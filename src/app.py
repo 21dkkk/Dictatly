@@ -1,0 +1,324 @@
+"""
+Main Application Coordinator for SuperDictate Windows.
+Connects Audio capture, Hotkeys, Caret tracker, ASR Engine, AI Cleaner,
+Floating Capsule HUD, History, and Settings.
+"""
+
+import sys
+import time
+import threading
+from pathlib import Path
+from typing import List, Optional
+
+from PySide6.QtCore import QObject, Signal, QTimer, Slot
+from PySide6.QtWidgets import QApplication
+
+from .config import AppConfig
+from .localization import t
+from .core.audio import AudioRecorder
+from .core.caret import get_caret_screen_position
+from .core.hotkey import GlobalHotkeyManager, key_combo_to_display
+from .core.injector import inject_text
+from .core.database import HistoryDatabase
+from .core.security import decrypt_secret
+from .engine.transcriber import SpeechTranscriber
+from .engine.ai_cleaner import AICleaner
+from .ui.hud import RecordingHUD, HUDState
+from .ui.history_window import QuickHistoryWindow
+from .ui.settings_window import SettingsWindow
+from .ui.tray import SystemTrayManager
+
+class SuperDictateApp(QObject):
+    # Signals for thread-safe UI updates from background threads
+    hud_state_signal = Signal(int)
+    hud_volume_signal = Signal(float)
+    hud_position_signal = Signal(int, int)
+    batch_progress_signal = Signal(int, int, float)  # current, total, progress 0..1
+    batch_finished_signal = Signal()
+    open_history_signal = Signal()
+    open_settings_signal = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.config = AppConfig()
+        self.db = HistoryDatabase()
+
+        # Core Engines
+        self.audio = AudioRecorder(device_index=self.config["microphone_device"])
+        self.audio.on_volume_level = self._on_volume_level
+
+        self.transcriber = SpeechTranscriber(
+            model_size=self.config["whisper_model"],
+            device_pref=self.config["compute_device"]
+        )
+
+        self.hotkey_mgr = GlobalHotkeyManager()
+
+        # Pre-warm Whisper model in background thread
+        threading.Thread(target=self.transcriber.load_model, daemon=True).start()
+
+        # UI Components
+        self.hud = RecordingHUD(
+            size_mode=self.config["capsule_size"],
+            theme=self.config["capsule_theme"]
+        )
+        self.history_window: Optional[QuickHistoryWindow] = None
+        self.settings_window: Optional[SettingsWindow] = None
+        self.tray = SystemTrayManager(self.config)
+        self.target_hwnd: Optional[int] = None
+
+        # Wire Signals
+        self.hud_state_signal.connect(self.hud.set_state)
+        self.hud_volume_signal.connect(self.hud.set_volume)
+        self.hud_position_signal.connect(self.hud.move_to_caret)
+        self.batch_progress_signal.connect(self._on_batch_progress)
+        self.batch_finished_signal.connect(self._on_batch_finished)
+
+        self.open_history_signal.connect(self.toggle_history)
+        self.open_settings_signal.connect(self.show_settings)
+
+        # Connect Tray Actions
+        self.tray.open_settings_requested.connect(self.show_settings)
+        self.tray.open_history_requested.connect(self.toggle_history)
+        self.tray.toggle_dictation_requested.connect(self.toggle_dictation)
+        self.tray.exit_requested.connect(self.exit_app)
+
+        # Register & start Global Hotkeys
+        self._register_all_hotkeys()
+        self.hotkey_mgr.start()
+
+        # Startup notification
+        lang = self.config["interface_language"]
+        main_key_display = key_combo_to_display(self.config["hotkey_main"])
+        msg = f"Готов к работе. Нажмите {main_key_display} для записи." if lang == "ru" else f"Ready. Press {main_key_display} to dictate."
+        QTimer.singleShot(800, lambda: self.tray.show_notification("Dictatly", msg))
+
+    def _register_all_hotkeys(self):
+        """Registers configured hotkeys."""
+        self.hotkey_mgr.clear_hotkeys()
+
+        # 1. Main Hotkey
+        main_key = self.config["hotkey_main"]
+        if main_key:
+            self.hotkey_mgr.register_hotkey(main_key, lambda: self.toggle_dictation(inverted_enter=False))
+
+        # 2. Alternative Finish Hotkey
+        alt_key = self.config["hotkey_alt"]
+        if alt_key:
+            self.hotkey_mgr.register_hotkey(alt_key, lambda: self.toggle_dictation(inverted_enter=True))
+
+        # 3. Quick History Hotkey
+        hist_key = self.config["hotkey_history"]
+        if hist_key:
+            self.hotkey_mgr.register_hotkey(hist_key, self.open_history_signal.emit)
+
+    def _on_volume_level(self, vol: float):
+        """RMS Volume update to capsule equalizer bars."""
+        if self.audio.is_recording:
+            self.hud_volume_signal.emit(vol)
+
+    def toggle_dictation(self, inverted_enter: bool = False):
+        """Toggles push-to-talk / toggle-to-talk recording."""
+        if not self.audio.is_recording:
+            self._start_dictation()
+        else:
+            self._finish_dictation(inverted_enter=inverted_enter)
+
+    def _start_dictation(self):
+        """Starts audio recording and displays HUD at caret position."""
+        # Capture target window handle right when dictation begins
+        import ctypes
+        self.target_hwnd = ctypes.windll.user32.GetForegroundWindow()
+
+        # Find caret position
+        cx, cy = get_caret_screen_position()
+        self.hud_position_signal.emit(cx, cy)
+        self.hud_state_signal.emit(HUDState.RECORDING)
+
+        started = self.audio.start()
+        if not started:
+            self.hud_state_signal.emit(HUDState.IDLE)
+
+    def _finish_dictation(self, inverted_enter: bool = False):
+        """Stops recording, runs ASR, AI cleaning, and text injection."""
+        duration = self.audio.recording_duration
+        audio_data = self.audio.stop()
+
+        if audio_data is None:
+            print(f"[App] Audio clip duration too short ({duration:.2f}s < 0.25s). Discarding.")
+            self.hud_state_signal.emit(HUDState.IDLE)
+            return
+
+        print(f"[App] Audio recorded: {len(audio_data)} samples ({duration:.2f}s). Transcribing...")
+        # Show transcribing spinner
+        self.hud_state_signal.emit(HUDState.TRANSCRIBING)
+
+        # Determine Enter behavior
+        default_enter = self.config["enter_after_insert"]
+        press_enter = not default_enter if inverted_enter else default_enter
+
+        # Resolve target window handle to guarantee focus when background worker completes
+        import ctypes
+        user32 = ctypes.windll.user32
+        cur_fg = user32.GetForegroundWindow()
+        hud_hwnd = int(self.hud.winId()) if self.hud else 0
+        settings_hwnd = int(self.settings_window.winId()) if self.settings_window else 0
+        history_hwnd = int(self.history_window.winId()) if self.history_window else 0
+
+        target_hwnd = self.target_hwnd
+        if cur_fg and cur_fg not in (hud_hwnd, settings_hwnd, history_hwnd):
+            target_hwnd = cur_fg
+
+        def worker():
+            try:
+                # 1. Local ASR
+                lang = self.config["dictation_language"]
+                text = self.transcriber.transcribe_audio(audio_data, language=lang)
+                if not text:
+                    print("[App] Transcription produced no text.")
+                    self.hud_state_signal.emit(HUDState.IDLE)
+                    return
+
+                print(f"[App] Recognized: {repr(text)}")
+
+                # 2. Optional AI text cleanup
+                if self.config["ai_cleanup_enabled"]:
+                    api_key = decrypt_secret(self.config["ai_api_key_encrypted"])
+                    if api_key:
+                        cleaner = AICleaner(
+                            base_url=self.config["ai_base_url"],
+                            model=self.config["ai_model"],
+                            api_key=api_key
+                        )
+                        text = cleaner.clean_text(text)
+                        print(f"[App] After AI cleanup: {repr(text)}")
+
+                # 3. Text injection at cursor
+                suffix = self.config["paste_suffix"]
+                print(f"[App] Pasting text at active caret...")
+                inject_text(text, suffix_mode=suffix, press_enter=press_enter, target_hwnd=target_hwnd)
+
+                # 4. Save to history database
+                self.db.add_entry(text, duration=duration, source="mic")
+
+                # 5. Success state on HUD
+                self.hud_state_signal.emit(HUDState.SUCCESS)
+                time.sleep(0.24)
+            except Exception as e:
+                print(f"[App] Error in dictation worker: {e}")
+            finally:
+                self.hud_state_signal.emit(HUDState.IDLE)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @Slot()
+    def toggle_history(self):
+        """Show or hide Quick History window."""
+        if self.history_window is None:
+            self.history_window = QuickHistoryWindow(self.db, self.config)
+            self.history_window.batch_transcribe_requested.connect(self._start_batch_transcribe)
+
+        if self.history_window.isVisible():
+            self.history_window.hide()
+        else:
+            self.history_window.refresh_list()
+            self.history_window.show()
+            self.history_window.raise_()
+            self.history_window.activateWindow()
+
+    @Slot()
+    def show_settings(self):
+        """Open Settings / Control Panel."""
+        if self.settings_window is None:
+            self.settings_window = SettingsWindow(self.config, self.hotkey_mgr)
+            self.settings_window.settings_saved.connect(self._on_settings_saved)
+            self.settings_window.restart_service_requested.connect(self._restart_services)
+
+        self.settings_window.show()
+        self.settings_window.raise_()
+        self.settings_window.activateWindow()
+
+    def _on_settings_saved(self):
+        """Apply newly saved settings."""
+        self.hud.set_mode_and_theme(
+            size_mode=self.config["capsule_size"],
+            theme=self.config["capsule_theme"]
+        )
+        self.audio.set_device(self.config["microphone_device"])
+        self.tray.update_language()
+        self._register_all_hotkeys()
+
+        # Update model if changed
+        if (self.transcriber.model_size != self.config["whisper_model"] or
+            self.transcriber.device_pref != self.config["compute_device"]):
+            self.transcriber.model_size = self.config["whisper_model"]
+            self.transcriber.device_pref = self.config["compute_device"]
+            self.transcriber._model = None
+            threading.Thread(target=self.transcriber.load_model, daemon=True).start()
+
+    def _restart_services(self):
+        """Restarts hotkey hook and audio streams."""
+        self.hotkey_mgr.stop()
+        time.sleep(0.1)
+        self._register_all_hotkeys()
+        self.hotkey_mgr.start()
+        self.tray.show_notification("Dictatly", "Служба перезапущена / Service restarted")
+
+    def _start_batch_transcribe(self, file_paths: List[str]):
+        """Processes drag & dropped audio files."""
+        if not file_paths or not self.history_window:
+            return
+
+        self.history_window.progress_bar.setVisible(True)
+        self.history_window.progress_bar.setValue(0)
+        self.history_window.drop_zone.setText(t("batch_processing", self.config["interface_language"]))
+
+        export_dir = Path(self.config["export_folder"])
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        def worker():
+            total = len(file_paths)
+            for idx, fpath in enumerate(file_paths):
+                path_obj = Path(fpath)
+                
+                def on_file_prog(prog: float):
+                    self.batch_progress_signal.emit(idx + 1, total, prog)
+
+                text = self.transcriber.transcribe_file(
+                    fpath,
+                    language=self.config["dictation_language"],
+                    on_progress=on_file_prog
+                )
+                
+                if text:
+                    # Save .txt file in export folder
+                    out_txt = export_dir / f"{path_obj.stem}.txt"
+                    try:
+                        out_txt.write_text(text, encoding="utf-8")
+                    except Exception as e:
+                        print(f"[Batch] Error writing {out_txt}: {e}")
+
+                    # Add to history
+                    self.db.add_entry(text, duration=0.0, source="file")
+
+            self.batch_finished_signal.emit()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_batch_progress(self, current: int, total: int, prog: float):
+        if self.history_window:
+            percent = int(((current - 1 + prog) / total) * 100)
+            self.history_window.progress_bar.setValue(percent)
+
+    def _on_batch_finished(self):
+        if self.history_window:
+            self.history_window.progress_bar.setVisible(False)
+            self.history_window.drop_zone.setText(t("batch_import_hint", self.config["interface_language"]))
+            self.history_window.refresh_list()
+        self.tray.show_notification("Dictatly", "Пакетная транскрипция завершена! / Batch transcription complete!")
+
+    def exit_app(self):
+        """Clean shutdown."""
+        self.hotkey_mgr.stop()
+        self.audio.stop()
+        QApplication.quit()
