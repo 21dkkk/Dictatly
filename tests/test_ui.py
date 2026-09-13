@@ -2,9 +2,14 @@
 UI verification test for PySide6 widgets (Settings, History, HUD).
 """
 
+import os
 import sys
 import unittest
 from pathlib import Path
+
+# Ensure headless operation for CI runners
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 from PySide6.QtWidgets import QApplication
 
 BASE_DIR = Path(__file__).resolve().parent.parent
