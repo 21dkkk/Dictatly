@@ -134,32 +134,65 @@ class GlobalHotkeyManager:
         self._pressed_keys: Set[str] = set()
         self._active_single_key: Optional[str] = None
         self._chord_triggered: bool = False
+        self._active_ptt_combo: Optional[str] = None
         self._lock = threading.Lock()
         
         # Registered hotkeys: normalized_combo -> callback
         self._hotkey_callbacks: Dict[str, Callable[[], None]] = {}
+        self._hotkey_press_callbacks: Dict[str, Callable[[], None]] = {}
+        self._hotkey_release_callbacks: Dict[str, Callable[[], None]] = {}
         
+        # Pause mode (gaming / meeting mute)
+        self.is_paused: bool = False
+        
+        # Cancel key callback (Esc during recording)
+        self.on_escape_pressed: Optional[Callable[[], None]] = None
+
         # Capture mode (when recording new hotkey in Settings)
         self.is_recording_new_hotkey: bool = False
         self.on_hotkey_recorded: Optional[Callable[[str], None]] = None
 
     def register_hotkey(self, combo: str, callback: Callable[[], None]):
-        """Register callback for a given combo (e.g. 'VK_RCONTROL')."""
+        """Register toggle callback for a given combo (e.g. 'VK_RCONTROL')."""
         norm = normalize_key_string(combo)
         with self._lock:
             self._hotkey_callbacks[norm] = callback
             print(f"[Hotkey] Registered: {norm} ({key_combo_to_display(norm)})")
 
+    def register_hotkey_handlers(self, combo: str, on_press: Optional[Callable[[], None]] = None, on_release: Optional[Callable[[], None]] = None):
+        """Register separate on_press and on_release handlers for push-to-talk."""
+        norm = normalize_key_string(combo)
+        with self._lock:
+            if on_press:
+                self._hotkey_press_callbacks[norm] = on_press
+            if on_release:
+                self._hotkey_release_callbacks[norm] = on_release
+            print(f"[Hotkey] Registered handlers: {norm} (press={bool(on_press)}, release={bool(on_release)})")
+
     def unregister_hotkey(self, combo: str):
         norm = normalize_key_string(combo)
         with self._lock:
             self._hotkey_callbacks.pop(norm, None)
+            self._hotkey_press_callbacks.pop(norm, None)
+            self._hotkey_release_callbacks.pop(norm, None)
 
     def clear_hotkeys(self):
         with self._lock:
             self._hotkey_callbacks.clear()
+            self._hotkey_press_callbacks.clear()
+            self._hotkey_release_callbacks.clear()
             self._active_single_key = None
             self._chord_triggered = False
+            self._active_ptt_combo = None
+
+    def set_paused(self, paused: bool):
+        """Temporarily pauses or resumes all global hotkeys (e.g. for meetings/gaming)."""
+        with self._lock:
+            self.is_paused = paused
+            self._pressed_keys.clear()
+            self._active_single_key = None
+            self._active_ptt_combo = None
+            print(f"[Hotkey] Paused state set to: {paused}")
 
     def _get_clean_combo(self, keys: Set[str]) -> str:
         c = set(keys)
@@ -200,12 +233,23 @@ class GlobalHotkeyManager:
                 if kb.flags & LLKHF_INJECTED:
                     return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
 
+                # If hotkeys are paused for meeting/gaming, pass through all keys
+                if self.is_paused and not self.is_recording_new_hotkey:
+                    return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
+
                 key_name = self._resolve_vk(kb.vkCode, kb.scanCode, kb.flags)
                 
                 is_down = (wParam in (WM_KEYDOWN, WM_SYSKEYDOWN))
                 is_up = (wParam in (WM_KEYUP, WM_SYSKEYUP))
 
                 if is_down:
+                    # Check for Escape cancellation while dictating
+                    if key_name == "VK_ESCAPE" and self.on_escape_pressed and not self.is_recording_new_hotkey:
+                        cb = self.on_escape_pressed
+                        self.on_escape_pressed = None
+                        threading.Thread(target=cb, daemon=True).start()
+                        return 1  # Suppress Escape key so it solely cancels dictation
+
                     with self._lock:
                         already_pressed = key_name in self._pressed_keys
                         self._pressed_keys.add(key_name)
@@ -220,7 +264,14 @@ class GlobalHotkeyManager:
                     if already_pressed:
                         return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
 
-                    # Check if this is a multi-key chord or a solitary key
+                    # 1. Check if an explicit on_press callback is registered for this combo (Push-to-Talk)
+                    press_cb = self._hotkey_press_callbacks.get(clean_combo)
+                    if press_cb:
+                        self._active_ptt_combo = clean_combo
+                        threading.Thread(target=press_cb, daemon=True).start()
+                        return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
+
+                    # 2. Check if this is a multi-key chord or a solitary key (Toggle mode)
                     parts = clean_combo.split("+")
                     with self._lock:
                         if len(parts) > 1:
@@ -245,8 +296,19 @@ class GlobalHotkeyManager:
                         if key_name == "VK_RMENU":
                             self._pressed_keys.discard("VK_LCONTROL")
 
-                        # If solitary modifier released without a chord fired during hold
-                        if self._active_single_key == key_name:
+                        # Check explicit on_release callback (Push-to-Talk)
+                        rel_cb = None
+                        if self._active_ptt_combo and key_name in self._active_ptt_combo.split("+"):
+                            rel_cb = self._hotkey_release_callbacks.get(self._active_ptt_combo)
+                            self._active_ptt_combo = None
+                        elif key_name in self._hotkey_release_callbacks:
+                            rel_cb = self._hotkey_release_callbacks.get(key_name)
+
+                        if rel_cb:
+                            threading.Thread(target=rel_cb, daemon=True).start()
+
+                        # If solitary modifier released without a chord fired during hold (Toggle mode)
+                        elif self._active_single_key == key_name:
                             if not self._chord_triggered:
                                 cb = self._hotkey_callbacks.get(key_name)
                                 if cb:
@@ -298,3 +360,6 @@ class GlobalHotkeyManager:
         if self._thread_id:
             user32.PostThreadMessageW(self._thread_id, 0x0012, 0, 0)  # WM_QUIT
             self._thread_id = None
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        self._thread = None

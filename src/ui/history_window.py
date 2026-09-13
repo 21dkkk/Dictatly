@@ -1,5 +1,5 @@
 """
-High-End Quick History Window & Audio Batch Transcription for SuperDictate Windows.
+High-End Quick History Window & Audio Batch Transcription for Dictatly Windows.
 Features:
 - Sleek transcript cards with relative time formatting, word count & duration badges
 - Drag & Drop audio zone with drag-over visual feedback
@@ -132,9 +132,10 @@ class TranscriptCard(QFrame):
 
 class DropZoneWidget(QFrame):
     """Minimalist Drag & Drop Zone in Apple aesthetic."""
-    def __init__(self, theme: str = "dark"):
+    def __init__(self, theme: str = "dark", lang: str = "ru"):
         super().__init__()
         self.theme = theme
+        self.lang = lang
         self.is_drag_over = False
         self.setObjectName("DropZone")
         self.setFixedHeight(60)
@@ -143,17 +144,30 @@ class DropZoneWidget(QFrame):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(2)
 
-        self.lbl_icon = QLabel("Перетащите аудиофайлы (.mp3, .wav, .m4a)")
+        hint = t("batch_import_hint", lang)
+        sub = "Автоматическая транскрипция и экспорт в .txt" if lang == "ru" else "Automatic transcription and export to .txt"
+        self.lbl_icon = QLabel(hint)
         self.lbl_icon.setAlignment(Qt.AlignCenter)
         self.lbl_icon.setStyleSheet("font-size: 12px; font-weight: 600; color: #FFFFFF;" if theme == "dark" else "font-size: 12px; font-weight: 600; color: #000000;")
 
-        self.lbl_sub = QLabel("Автоматическая транскрипция и экспорт в .txt")
+        self.lbl_sub = QLabel(sub)
         self.lbl_sub.setAlignment(Qt.AlignCenter)
         self.lbl_sub.setStyleSheet("font-size: 11px; color: #8E8E93;")
 
         layout.addWidget(self.lbl_icon)
         layout.addWidget(self.lbl_sub)
         self._update_style()
+
+    def set_text(self, title: str, subtitle: Optional[str] = None):
+        """Update drop zone display text."""
+        self.lbl_icon.setText(title)
+        if subtitle is not None:
+            self.lbl_sub.setText(subtitle)
+            self.lbl_sub.setVisible(bool(subtitle))
+
+    def setText(self, text: str):
+        """Compatibility setter for single text string."""
+        self.set_text(text)
 
     def set_drag_over(self, active: bool):
         self.is_drag_over = active
@@ -250,6 +264,21 @@ class QuickHistoryWindow(QWidget):
         header.addWidget(btn_close)
         layout.addLayout(header)
 
+        # Productivity Stats
+        self.lbl_stats = QLabel()
+        self.lbl_stats.setStyleSheet("""
+            QLabel {
+                background-color: #242428;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 8px;
+                padding: 6px 12px;
+                color: #A1A1A6;
+                font-size: 12px;
+                font-weight: 500;
+            }
+        """)
+        layout.addWidget(self.lbl_stats)
+
         # Search Bar
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Поиск по расшифровкам...")
@@ -298,7 +327,7 @@ class QuickHistoryWindow(QWidget):
         layout.addWidget(self.scroll_area, 1)
 
         # Drag & Drop Zone
-        self.drop_zone = DropZoneWidget(theme=theme)
+        self.drop_zone = DropZoneWidget(theme=theme, lang=lang)
         layout.addWidget(self.drop_zone)
 
         # Progress bar
@@ -423,6 +452,21 @@ class QuickHistoryWindow(QWidget):
         lang = self.config["interface_language"]
         theme = self.config["capsule_theme"]
         query = self.search_input.text()
+
+        # Update productivity stats
+        stats = self.db.get_today_stats()
+        words = stats["words"]
+        mins = stats["minutes_saved"]
+        if words > 0:
+            if lang == "ru":
+                self.lbl_stats.setText(f"⚡ Сегодня: {words:,} слов  •  ~{mins:.1f} мин сэкономлено")
+            else:
+                self.lbl_stats.setText(f"⚡ Today: {words:,} words  •  ~{mins:.1f} min saved")
+        else:
+            if lang == "ru":
+                self.lbl_stats.setText("⚡ Начните диктовку, чтобы отслеживать статистику за сегодня")
+            else:
+                self.lbl_stats.setText("⚡ Start dictating to track your productivity today")
 
         # Clear existing cards
         while self.cards_layout.count() > 1:

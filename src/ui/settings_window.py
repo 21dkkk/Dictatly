@@ -1,11 +1,7 @@
 """
-Modern Settings & Control Panel for Dictatly Windows.
-Follows Apple macOS Sequoia System Settings design language:
-- Warm graphite/titanium palette (no harsh pitch black, no AI-slop)
-- Native SF Pro / Segoe UI Variable typography with sentence-case hierarchy
-- Tactile Apple Chiclet Keycaps with modifier glyphs (⌃, ⌥, ⇧, ⊞)
-- In-place instant language switching (RU / EN) without window crash
-- App squircle icon in header and window title
+Settings & Control Panel for Dictatly Windows.
+Configuration for hotkeys, text injection behavior, audio input devices,
+Faster-Whisper model selection, floating HUD, and optional AI text cleanup.
 """
 
 import math
@@ -20,7 +16,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QFrame, QScrollArea, QComboBox, QCheckBox,
-    QFileDialog
+    QFileDialog, QPlainTextEdit
 )
 
 from ..localization import t
@@ -28,7 +24,9 @@ from ..config import AppConfig
 from ..core.hotkey import GlobalHotkeyManager
 from ..core.audio import AudioRecorder
 from ..core.security import encrypt_secret, decrypt_secret
+from ..core.autostart import is_autostart_enabled, set_autostart, create_shortcuts
 from ..engine.ai_cleaner import AICleaner
+from .hud import CapsulePreviewCanvas, HUDState
 
 # Keycap modifier glyph mappings (Apple style)
 KEY_GLYPHS = {
@@ -139,7 +137,7 @@ class KeycapButton(QPushButton):
         painter.drawText(rect, Qt.AlignCenter, self.text())
 
 class SettingsCard(QFrame):
-    """Grouped card container in Apple macOS Sequoia style."""
+    """Grouped card container with standard rounded borders."""
     def __init__(self, theme: str = "dark"):
         super().__init__()
         self.setObjectName("SettingsCard")
@@ -163,15 +161,88 @@ class SettingsCard(QFrame):
                 }
             """)
 
+class MicLevelMeter(QWidget):
+    """Sleek real-time audio volume VU-meter bar with smooth decay."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(10)
+        self.setMinimumWidth(180)
+        self._target_level: float = 0.0
+        self._current_level: float = 0.0
+        self._decay_timer = QTimer(self)
+        self._decay_timer.setInterval(25)
+        self._decay_timer.timeout.connect(self._step_decay)
+
+    def set_level(self, level: float):
+        level = max(0.0, min(1.0, float(level)))
+        if level > self._target_level:
+            self._target_level = level
+            self._current_level = max(self._current_level, level * 0.85)
+        else:
+            self._target_level = level
+        if not self._decay_timer.isActive():
+            self._decay_timer.start()
+        self.update()
+
+    def reset(self):
+        self._target_level = 0.0
+        self._current_level = 0.0
+        self._decay_timer.stop()
+        self.update()
+
+    def _step_decay(self):
+        if self._current_level < self._target_level:
+            self._current_level += (self._target_level - self._current_level) * 0.5
+        else:
+            self._current_level += (self._target_level - self._current_level) * 0.18
+        if self._current_level < 0.01 and self._target_level < 0.01:
+            self._current_level = 0.0
+            self._decay_timer.stop()
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        w = float(self.width())
+        h = float(self.height())
+        radius = h / 2.0
+
+        # Background track
+        track_rect = QRectF(0.5, 0.5, w - 1.0, h - 1.0)
+        track_path = QPainterPath()
+        track_path.addRoundedRect(track_rect, radius, radius)
+        painter.fillPath(track_path, QBrush(QColor(36, 36, 40)))
+        painter.setPen(QPen(QColor(255, 255, 255, 20), 1.0))
+        painter.drawPath(track_path)
+
+        # Active level fill
+        fill_w = max(0.0, (w - 2.0) * self._current_level)
+        if fill_w > 2.0:
+            fill_rect = QRectF(1.0, 1.0, fill_w, h - 2.0)
+            fill_path = QPainterPath()
+            fill_path.addRoundedRect(fill_rect, radius - 0.5, radius - 0.5)
+
+            grad = QLinearGradient(0, 0, w, 0)
+            grad.setColorAt(0.0, QColor(48, 209, 88))
+            grad.setColorAt(0.7, QColor(255, 214, 10))
+            grad.setColorAt(0.9, QColor(255, 159, 10))
+            grad.setColorAt(1.0, QColor(255, 69, 58))
+
+            painter.fillPath(fill_path, QBrush(grad))
+
 class SettingsWindow(QWidget):
     settings_saved = Signal()
     restart_service_requested = Signal()
+    preview_hud_requested = Signal(str)
+    mic_level_signal = Signal(float)
 
     def __init__(self, config: AppConfig, hotkey_mgr: GlobalHotkeyManager):
         super().__init__()
         self.config = config
         self.hotkey_mgr = hotkey_mgr
         self.current_recording_target = None
+        self._mic_test_stream = None
         self.setAttribute(Qt.WA_StyledBackground, True)
 
         # Set Window Icon
@@ -184,6 +255,8 @@ class SettingsWindow(QWidget):
         self.resize(560, 710)
 
         self._init_ui()
+        self.mic_level_signal.connect(self.meter_mic.set_level)
+        self.combo_mic.currentIndexChanged.connect(lambda: self._start_mic_test_stream() if self.isVisible() else None)
         self.retranslate_ui()
 
     def _init_ui(self):
@@ -241,20 +314,68 @@ class SettingsWindow(QWidget):
         card_hk_layout.addWidget(hk_hist_w)
         body_layout.addWidget(self.card_hotkeys)
 
-        # === Card 2: Поведение при вставке (Behavior) ===
+        # === Card 2: Режим записи и поведение (Behavior & Mode) ===
         self.hdr_behavior = self._create_section_header("")
         body_layout.addWidget(self.hdr_behavior)
 
         self.card_behavior = SettingsCard(theme)
         card_b_layout = QVBoxLayout(self.card_behavior)
         card_b_layout.setContentsMargins(16, 12, 16, 12)
-        card_b_layout.setSpacing(12)
+        card_b_layout.setSpacing(10)
 
+        # Recording Mode (Toggle vs Push-to-Talk)
+        mode_row = QHBoxLayout()
+        self.lbl_rec_mode = QLabel()
+        self.combo_rec_mode = QComboBox()
+        self.combo_rec_mode.setMaximumWidth(190)
+        self.combo_rec_mode.addItem("", "toggle")
+        self.combo_rec_mode.addItem("", "push_to_talk")
+        rm_idx = self.combo_rec_mode.findData(self.config.get("recording_mode", "toggle"))
+        if rm_idx >= 0:
+            self.combo_rec_mode.setCurrentIndex(rm_idx)
+        mode_row.addWidget(self.lbl_rec_mode)
+        mode_row.addStretch()
+        mode_row.addWidget(self.combo_rec_mode)
+        card_b_layout.addLayout(mode_row)
+        card_b_layout.addWidget(self._create_divider(theme))
+
+        # Audio Feedback
+        self.chk_sound = QCheckBox()
+        self.chk_sound.setChecked(self.config.get("sound_effects_enabled", True))
+        card_b_layout.addWidget(self.chk_sound)
+        card_b_layout.addWidget(self._create_divider(theme))
+
+        # Smart Punctuation
+        self.chk_smart_punct = QCheckBox()
+        self.chk_smart_punct.setChecked(self.config.get("smart_punctuation_enabled", True))
+        card_b_layout.addWidget(self.chk_smart_punct)
+        card_b_layout.addWidget(self._create_divider(theme))
+
+        # Silence Auto-Stop Timeout
+        silence_row = QHBoxLayout()
+        self.lbl_silence = QLabel()
+        self.combo_silence = QComboBox()
+        self.combo_silence.setMaximumWidth(190)
+        self.combo_silence.addItem("", 0)
+        self.combo_silence.addItem("", 10)
+        self.combo_silence.addItem("", 15)
+        self.combo_silence.addItem("", 30)
+        s_idx = self.combo_silence.findData(self.config.get("silence_timeout_seconds", 15))
+        if s_idx >= 0:
+            self.combo_silence.setCurrentIndex(s_idx)
+        silence_row.addWidget(self.lbl_silence)
+        silence_row.addStretch()
+        silence_row.addWidget(self.combo_silence)
+        card_b_layout.addLayout(silence_row)
+        card_b_layout.addWidget(self._create_divider(theme))
+
+        # Enter after insert
         self.chk_enter = QCheckBox()
         self.chk_enter.setChecked(self.config["enter_after_insert"])
         card_b_layout.addWidget(self.chk_enter)
         card_b_layout.addWidget(self._create_divider(theme))
 
+        # Suffix
         suffix_row = QHBoxLayout()
         self.lbl_suffix = QLabel()
         self.combo_suffix = QComboBox()
@@ -265,12 +386,76 @@ class SettingsWindow(QWidget):
         s_idx = self.combo_suffix.findData(self.config["paste_suffix"])
         if s_idx >= 0:
             self.combo_suffix.setCurrentIndex(s_idx)
-
         suffix_row.addWidget(self.lbl_suffix)
         suffix_row.addStretch()
         suffix_row.addWidget(self.combo_suffix)
         card_b_layout.addLayout(suffix_row)
         body_layout.addWidget(self.card_behavior)
+
+        # === Card: Словарь автозамен (Vocabulary) ===
+        self.hdr_vocab = self._create_section_header("")
+        body_layout.addWidget(self.hdr_vocab)
+
+        self.card_vocab = SettingsCard(theme)
+        card_v_layout = QVBoxLayout(self.card_vocab)
+        card_v_layout.setContentsMargins(16, 12, 16, 12)
+        card_v_layout.setSpacing(6)
+
+        self.hint_vocab = QLabel()
+        self.hint_vocab.setStyleSheet("color: #86868B; font-size: 11px;")
+        card_v_layout.addWidget(self.hint_vocab)
+
+        self.txt_vocab = QPlainTextEdit()
+        self.txt_vocab.setFixedHeight(90)
+        self.txt_vocab.setPlaceholderText("гитхаб = GitHub\nпайтон = Python\nдокер = Docker")
+        repls = self.config.get("custom_replacements", {})
+        lines = [f"{k} = {v}" for k, v in repls.items()]
+        self.txt_vocab.setPlainText("\n".join(lines))
+        card_v_layout.addWidget(self.txt_vocab)
+        body_layout.addWidget(self.card_vocab)
+
+        # === Card: Система и запуск (System & Launch) ===
+        self.hdr_system = self._create_section_header("")
+        body_layout.addWidget(self.hdr_system)
+
+        self.card_system = SettingsCard(theme)
+        card_sys_layout = QVBoxLayout(self.card_system)
+        card_sys_layout.setContentsMargins(16, 12, 16, 12)
+        card_sys_layout.setSpacing(10)
+
+        # Autostart checkbox & hint
+        autostart_vbox = QVBoxLayout()
+        autostart_vbox.setSpacing(3)
+        self.chk_autostart = QCheckBox()
+        self.chk_autostart.setChecked(is_autostart_enabled())
+        self.chk_autostart.toggled.connect(self._on_autostart_toggled)
+        autostart_vbox.addWidget(self.chk_autostart)
+        self.hint_autostart = QLabel()
+        self.hint_autostart.setStyleSheet("color: #86868B; font-size: 11px; margin-left: 24px;")
+        autostart_vbox.addWidget(self.hint_autostart)
+        card_sys_layout.addLayout(autostart_vbox)
+
+        card_sys_layout.addWidget(self._create_divider(theme))
+
+        # Shortcuts row
+        shortcuts_row = QHBoxLayout()
+        shortcuts_vbox = QVBoxLayout()
+        shortcuts_vbox.setSpacing(3)
+        self.lbl_shortcuts = QLabel()
+        self.lbl_shortcuts.setStyleSheet("font-size: 13px; font-weight: 500;")
+        self.hint_shortcuts = QLabel()
+        self.hint_shortcuts.setStyleSheet("color: #86868B; font-size: 11px;")
+        shortcuts_vbox.addWidget(self.lbl_shortcuts)
+        shortcuts_vbox.addWidget(self.hint_shortcuts)
+        shortcuts_row.addLayout(shortcuts_vbox, 1)
+
+        self.btn_shortcuts = QPushButton()
+        self.btn_shortcuts.setFixedWidth(140)
+        self.btn_shortcuts.clicked.connect(self._create_app_shortcuts)
+        shortcuts_row.addWidget(self.btn_shortcuts)
+        card_sys_layout.addLayout(shortcuts_row)
+
+        body_layout.addWidget(self.card_system)
 
         # === Card 3: Аудио и Микрофон (Audio & Export) ===
         self.hdr_audio = self._create_section_header("")
@@ -290,17 +475,42 @@ class SettingsWindow(QWidget):
         self.combo_mic.addItem("", None)
         devices = AudioRecorder.get_input_devices()
         cur_dev = self.config["microphone_device"]
+        
+        # Match current device by index or fallback to name matching (for device migrations)
+        matched = False
+        saved_name = None
+        if cur_dev is not None:
+            try:
+                import sounddevice as sd
+                saved_name = sd.query_devices(cur_dev).get("name", "").strip().lower()
+            except Exception:
+                saved_name = None
+
         for d in devices:
             clean_name = d["name"].replace("\r", " ").replace("\n", " ").strip()
-            if len(clean_name) > 40:
-                clean_name = clean_name[:37] + "..."
-            self.combo_mic.addItem(clean_name, d["index"])
-            if cur_dev == d["index"]:
-                self.combo_mic.setCurrentIndex(self.combo_mic.count() - 1)
+            display_name = clean_name if len(clean_name) <= 40 else clean_name[:37] + "..."
+            self.combo_mic.addItem(display_name, d["index"])
+            if not matched:
+                if cur_dev == d["index"]:
+                    self.combo_mic.setCurrentIndex(self.combo_mic.count() - 1)
+                    matched = True
+                elif saved_name and saved_name == d["name"].strip().lower():
+                    self.combo_mic.setCurrentIndex(self.combo_mic.count() - 1)
+                    matched = True
         mic_row.addWidget(self.lbl_mic)
         mic_row.addStretch()
         mic_row.addWidget(self.combo_mic)
         card_a_layout.addLayout(mic_row)
+
+        meter_row = QHBoxLayout()
+        meter_row.setContentsMargins(0, 2, 0, 2)
+        self.lbl_mic_test = QLabel()
+        self.lbl_mic_test.setStyleSheet("color: #86868B; font-size: 11px;")
+        self.meter_mic = MicLevelMeter()
+        meter_row.addWidget(self.lbl_mic_test)
+        meter_row.addSpacing(6)
+        meter_row.addWidget(self.meter_mic, 1)
+        card_a_layout.addLayout(meter_row)
 
         card_a_layout.addWidget(self._create_divider(theme))
 
@@ -363,35 +573,67 @@ class SettingsWindow(QWidget):
         body_layout.addWidget(self.hdr_hud)
 
         self.card_hud = SettingsCard(theme)
-        card_h_layout = QHBoxLayout(self.card_hud)
-        card_h_layout.setContentsMargins(16, 12, 16, 12)
+        card_hud_layout = QVBoxLayout(self.card_hud)
+        card_hud_layout.setContentsMargins(16, 12, 16, 12)
+        card_hud_layout.setSpacing(10)
 
+        # Top row: Size label, ComboBox, and Test Button
+        size_row = QHBoxLayout()
         self.lbl_size = QLabel()
+        self.lbl_size.setStyleSheet("font-size: 13px; font-weight: 500;")
+
         self.combo_size = QComboBox()
-        self.combo_size.setMaximumWidth(140)
-        self.combo_size.addItem("Компактный (S)", "small")
-        self.combo_size.addItem("Стандартный (M)", "medium")
-        self.combo_size.addItem("Крупный (L)", "large")
+        self.combo_size.setMinimumWidth(185)
+        self.combo_size.addItem("", "small")
+        self.combo_size.addItem("", "medium")
+        self.combo_size.addItem("", "large")
         sidx = self.combo_size.findData(self.config["capsule_size"])
         if sidx >= 0:
             self.combo_size.setCurrentIndex(sidx)
+        self.combo_size.currentIndexChanged.connect(self._on_size_changed)
 
-        self.lbl_theme = QLabel()
-        self.combo_theme = QComboBox()
-        self.combo_theme.setMaximumWidth(140)
-        self.combo_theme.addItem("", "dark")
-        self.combo_theme.addItem("", "light")
-        tidx = self.combo_theme.findData(self.config["capsule_theme"])
-        if tidx >= 0:
-            self.combo_theme.setCurrentIndex(tidx)
-        self.combo_theme.currentIndexChanged.connect(self._on_theme_changed)
+        self.btn_test_hud = QPushButton()
+        self.btn_test_hud.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 6px;
+                padding: 5px 12px;
+                color: #F5F5F7;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 0.15);
+            }
+        """)
+        self.btn_test_hud.clicked.connect(self._on_test_hud_clicked)
 
-        card_h_layout.addWidget(self.lbl_size)
-        card_h_layout.addWidget(self.combo_size)
-        card_h_layout.addSpacing(20)
-        card_h_layout.addWidget(self.lbl_theme)
-        card_h_layout.addWidget(self.combo_theme)
-        card_h_layout.addStretch()
+        size_row.addWidget(self.lbl_size)
+        size_row.addWidget(self.combo_size)
+        size_row.addStretch()
+        size_row.addWidget(self.btn_test_hud)
+        card_hud_layout.addLayout(size_row)
+
+        card_hud_layout.addWidget(self._create_divider(theme))
+
+        # Bottom row: Live animated preview canvas
+        preview_container = QFrame()
+        preview_container.setStyleSheet("""
+            QFrame {
+                background-color: #1A1A1D;
+                border: 1px solid rgba(255, 255, 255, 0.06);
+                border-radius: 8px;
+            }
+        """)
+        preview_layout = QVBoxLayout(preview_container)
+        preview_layout.setContentsMargins(6, 6, 6, 6)
+
+        cur_size = self.config.get("capsule_size", "medium")
+        self.preview_canvas = CapsulePreviewCanvas(size_mode=cur_size)
+        preview_layout.addWidget(self.preview_canvas)
+        card_hud_layout.addWidget(preview_container)
+
         body_layout.addWidget(self.card_hud)
 
         # === Card 6: AI-чистка текста (Optional) ===
@@ -458,7 +700,8 @@ class SettingsWindow(QWidget):
         footer_layout.setContentsMargins(20, 12, 20, 12)
 
         self.btn_restart = QPushButton()
-        self.btn_restart.clicked.connect(self.restart_service_requested.emit)
+        self.btn_restart.setMinimumWidth(165)
+        self.btn_restart.clicked.connect(self._on_restart_clicked)
         footer_layout.addWidget(self.btn_restart)
 
         # Language Segmented Pill button
@@ -510,15 +753,43 @@ class SettingsWindow(QWidget):
         self.lbl_hk_history.setText(t("hotkey_history", lang) + ":")
         self.hint_hk_history.setText(t("hotkey_history_hint", lang))
 
-        # Behavior
+        # Behavior & Mode
+        self.hdr_behavior.setText(t("behavior_section", lang))
+        self.lbl_rec_mode.setText(t("recording_mode", lang) + ":")
+        self.combo_rec_mode.setItemText(0, t("mode_toggle", lang))
+        self.combo_rec_mode.setItemText(1, t("mode_push_to_talk", lang))
+        self.chk_sound.setText(t("sound_effects", lang))
+        self.chk_smart_punct.setText(t("smart_punctuation", lang))
+        self.lbl_silence.setText(t("silence_timeout", lang) + ":")
+        self.combo_silence.setItemText(0, t("timeout_disabled", lang))
+        self.combo_silence.setItemText(1, t("timeout_10s", lang))
+        self.combo_silence.setItemText(2, t("timeout_15s", lang))
+        self.combo_silence.setItemText(3, t("timeout_30s", lang))
         self.chk_enter.setText(t("enter_after_insert", lang))
         self.lbl_suffix.setText(t("paste_suffix", lang) + ":")
         self.combo_suffix.setItemText(0, t("suffix_space", lang))
         self.combo_suffix.setItemText(1, t("suffix_none", lang))
         self.combo_suffix.setItemText(2, t("suffix_newline", lang))
 
+        # Vocabulary
+        self.hdr_vocab.setText(t("vocabulary_section", lang))
+        self.hint_vocab.setText(t("vocabulary_hint", lang))
+        if lang == "ru":
+            self.txt_vocab.setPlaceholderText("гитхаб = GitHub\nпайтон = Python\nдокер = Docker")
+        else:
+            self.txt_vocab.setPlaceholderText("github = GitHub\npython = Python\ndocker = Docker")
+
+        # System & Launch
+        self.hdr_system.setText(t("system_section", lang))
+        self.chk_autostart.setText(t("autostart_with_windows", lang))
+        self.hint_autostart.setText(t("autostart_with_windows_hint", lang))
+        self.lbl_shortcuts.setText(t("create_shortcuts", lang))
+        self.hint_shortcuts.setText(t("create_shortcuts_hint", lang))
+        self.btn_shortcuts.setText(t("create_shortcuts", lang))
+
         # Audio
         self.lbl_mic.setText(t("microphone_select", lang) + ":")
+        self.lbl_mic_test.setText(t("mic_test_label", lang))
         self.combo_mic.setItemText(0, t("default_mic", lang))
         self.lbl_export.setText(t("export_folder", lang) + ":")
         self.btn_browse.setText(t("choose_folder", lang))
@@ -531,10 +802,18 @@ class SettingsWindow(QWidget):
         self.combo_dict_lang.setItemText(2, t("lang_en", lang))
 
         # HUD
+        self.hdr_hud.setText(t("hud_section", lang))
         self.lbl_size.setText(t("capsule_size", lang) + ":")
-        self.lbl_theme.setText(t("capsule_theme", lang) + ":")
-        self.combo_theme.setItemText(0, t("theme_dark", lang))
-        self.combo_theme.setItemText(1, t("theme_light", lang))
+        if lang == "ru":
+            self.combo_size.setItemText(0, "Компактный (74×32)")
+            self.combo_size.setItemText(1, "Стандартный (96×40)")
+            self.combo_size.setItemText(2, "Крупный (124×48)")
+            self.btn_test_hud.setText("Показать на экране")
+        else:
+            self.combo_size.setItemText(0, "Compact (74×32)")
+            self.combo_size.setItemText(1, "Standard (96×40)")
+            self.combo_size.setItemText(2, "Large (124×48)")
+            self.btn_test_hud.setText("Show on Screen")
 
         # AI
         self.lbl_ai_desc.setText(t("ai_cleanup_desc", lang))
@@ -545,7 +824,8 @@ class SettingsWindow(QWidget):
         self.btn_test_conn.setText(t("test_connection", lang))
 
         # Footer
-        self.btn_restart.setText(t("restart_service", lang))
+        if self.btn_restart.isEnabled():
+            self.btn_restart.setText(t("restart_service", lang))
         self.btn_cancel.setText(t("cancel", lang))
         self.btn_save.setText(t("save_and_restart", lang))
 
@@ -627,208 +907,206 @@ class SettingsWindow(QWidget):
             self.lbl_conn_status.setText(f"✗ {t('connection_failed', lang)}: {msg}")
             self.lbl_conn_status.setStyleSheet("color: #FF453A;")
 
+    def _on_restart_clicked(self):
+        self.btn_restart.setEnabled(False)
+        lang = self.config["interface_language"]
+        self.btn_restart.setText(t("restarting_service", lang))
+        self.restart_service_requested.emit()
+
+    def notify_service_restarted(self, success: bool = True, message: str = ""):
+        lang = self.config["interface_language"]
+        theme = self.config["capsule_theme"]
+        if success:
+            self.btn_restart.setText(f"✓ {t('service_restarted', lang)}")
+            if theme == "dark":
+                self.btn_restart.setStyleSheet("""
+                    QPushButton {
+                        background-color: #1A3322;
+                        border: 1px solid #34C759;
+                        color: #34C759;
+                        font-weight: 500;
+                        border-radius: 6px;
+                        padding: 5px 12px;
+                        font-size: 13px;
+                    }
+                """)
+            else:
+                self.btn_restart.setStyleSheet("""
+                    QPushButton {
+                        background-color: #E8F8ED;
+                        border: 1px solid #34C759;
+                        color: #248A3D;
+                        font-weight: 500;
+                        border-radius: 6px;
+                        padding: 5px 12px;
+                        font-size: 13px;
+                    }
+                """)
+        else:
+            self.btn_restart.setText(f"✗ {t('connection_failed', lang)}")
+            self.btn_restart.setStyleSheet("""
+                QPushButton {
+                    background-color: #3A1E1E;
+                    border: 1px solid #FF453A;
+                    color: #FF453A;
+                    font-weight: 500;
+                    border-radius: 6px;
+                    padding: 5px 12px;
+                    font-size: 13px;
+                }
+            """)
+
+        def revert():
+            self.btn_restart.setEnabled(True)
+            self.btn_restart.setStyleSheet("")
+            self.btn_restart.setText(t("restart_service", self.config["interface_language"]))
+
+        QTimer.singleShot(2500, revert)
+
+    def _on_autostart_toggled(self, checked: bool):
+        set_autostart(checked)
+        self.config["autostart_with_windows"] = checked
+        self.config.save()
+
+    def _create_app_shortcuts(self):
+        create_shortcuts(desktop=True, start_menu=True)
+        lang = self.config["interface_language"]
+        self.btn_shortcuts.setText(f"✓ {t('shortcuts_created', lang)}")
+        QTimer.singleShot(2500, lambda: self.btn_shortcuts.setText(t("create_shortcuts", self.config["interface_language"])))
+
     def _toggle_language(self):
         new_lang = "en" if self.config["interface_language"] == "ru" else "ru"
         self.config["interface_language"] = new_lang
         self.config.save()
         self.retranslate_ui()
 
-    def _on_theme_changed(self, idx: int):
-        new_theme = self.combo_theme.currentData()
-        self._apply_global_theme(new_theme)
-        for card in [self.card_hotkeys, self.card_behavior, self.card_audio, self.card_model, self.card_hud, self.card_ai]:
-            card.set_theme(new_theme)
-        for target in ["main", "alt", "history"]:
-            btn = getattr(self, f"btn_hotkey_{target}", None)
-            if btn:
-                btn.set_theme(new_theme)
+    def _on_size_changed(self, idx: int):
+        size = self.combo_size.currentData()
+        self.preview_canvas.set_size_mode(size)
 
-    def _apply_global_theme(self, theme: str):
-        if theme == "dark":
-            # Apple macOS Warm Graphite Dark
-            self.setStyleSheet("""
-                SettingsWindow, QScrollArea, #BodyWidget {
-                    background-color: #1E1E20;
-                    color: #F5F5F7;
-                    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", sans-serif;
-                }
-                #HeaderFrame {
-                    background-color: #242426;
-                    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
-                }
-                #FooterFrame {
-                    background-color: #242426;
-                    border-top: 1px solid rgba(255, 255, 255, 0.07);
-                }
-                QLabel {
-                    color: #F5F5F7;
-                    font-size: 13px;
-                }
-                QLineEdit, QComboBox {
-                    background-color: #1A1A1D;
-                    border: 1px solid rgba(255, 255, 255, 0.12);
-                    border-radius: 6px;
-                    padding: 5px 10px;
-                    color: #FFFFFF;
-                    font-size: 13px;
-                }
-                QLineEdit:focus, QComboBox:focus {
-                    border: 1px solid rgba(255, 255, 255, 0.35);
-                }
-                QComboBox::drop-down {
-                    border: none;
-                    padding-right: 8px;
-                }
-                QPushButton {
-                    background-color: #323236;
-                    border: 1px solid rgba(255, 255, 255, 0.1);
-                    border-radius: 6px;
-                    padding: 5px 12px;
-                    color: #F5F5F7;
-                    font-size: 13px;
-                }
-                QPushButton:hover {
-                    background-color: #3C3C40;
-                }
-                QCheckBox {
-                    color: #F5F5F7;
-                    font-size: 13px;
-                    spacing: 8px;
-                }
-                QCheckBox::indicator {
-                    width: 16px;
-                    height: 16px;
-                    border-radius: 4px;
-                    border: 1px solid rgba(255, 255, 255, 0.25);
-                    background-color: #1A1A1D;
-                }
-                QCheckBox::indicator:checked {
-                    background-color: #FFFFFF;
-                    border: 1px solid #FFFFFF;
-                    image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'><polyline points='20 6 9 17 4 12'></polyline></svg>");
-                }
-            """)
-            self.btn_save.setStyleSheet("""
-                QPushButton {
-                    background-color: #FFFFFF;
-                    color: #000000;
-                    font-weight: 600;
-                    padding: 6px 18px;
-                    border-radius: 6px;
-                    border: none;
-                    font-size: 13px;
-                }
-                QPushButton:hover {
-                    background-color: #E5E5EA;
-                }
-            """)
-            self.btn_lang.setStyleSheet("""
-                QPushButton {
-                    background-color: #2D2D30;
-                    color: #FFFFFF;
-                    border: 1px solid rgba(255, 255, 255, 0.1);
-                    border-radius: 13px;
-                    font-weight: 600;
-                    font-size: 11px;
-                }
-                QPushButton:hover {
-                    background-color: #38383D;
-                }
-            """)
-        else:
-            # Apple macOS Light Titanium
-            self.setStyleSheet("""
-                SettingsWindow, QScrollArea, #BodyWidget {
-                    background-color: #ECECEC;
-                    color: #1D1D1F;
-                    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", sans-serif;
-                }
-                #HeaderFrame {
-                    background-color: #F6F6F8;
-                    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
-                }
-                #FooterFrame {
-                    background-color: #F6F6F8;
-                    border-top: 1px solid rgba(0, 0, 0, 0.08);
-                }
-                QLabel {
-                    color: #1D1D1F;
-                    font-size: 13px;
-                }
-                QLineEdit, QComboBox {
-                    background-color: #FFFFFF;
-                    border: 1px solid rgba(0, 0, 0, 0.14);
-                    border-radius: 6px;
-                    padding: 5px 10px;
-                    color: #1D1D1F;
-                    font-size: 13px;
-                }
-                QLineEdit:focus, QComboBox:focus {
-                    border: 1px solid #000000;
-                }
-                QPushButton {
-                    background-color: #E5E5EA;
-                    border: 1px solid rgba(0, 0, 0, 0.08);
-                    border-radius: 6px;
-                    padding: 5px 12px;
-                    color: #1D1D1F;
-                    font-size: 13px;
-                }
-                QPushButton:hover {
-                    background-color: #DADAE0;
-                }
-                QCheckBox {
-                    color: #1D1D1F;
-                    font-size: 13px;
-                    spacing: 8px;
-                }
-                QCheckBox::indicator {
-                    width: 16px;
-                    height: 16px;
-                    border-radius: 4px;
-                    border: 1px solid #C7C7CC;
-                    background-color: #FFFFFF;
-                }
-                QCheckBox::indicator:checked {
-                    background-color: #000000;
-                    border: 1px solid #000000;
-                    image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'><polyline points='20 6 9 17 4 12'></polyline></svg>");
-                }
-            """)
-            self.btn_save.setStyleSheet("""
-                QPushButton {
-                    background-color: #000000;
-                    color: #FFFFFF;
-                    font-weight: 600;
-                    padding: 6px 18px;
-                    border-radius: 6px;
-                    border: none;
-                    font-size: 13px;
-                }
-                QPushButton:hover {
-                    background-color: #2C2C2E;
-                }
-            """)
-            self.btn_lang.setStyleSheet("""
-                QPushButton {
-                    background-color: #E2E2E8;
-                    color: #000000;
-                    border: 1px solid rgba(0, 0, 0, 0.1);
-                    border-radius: 13px;
-                    font-weight: 600;
-                    font-size: 11px;
-                }
-                QPushButton:hover {
-                    background-color: #D6D6DC;
-                }
-            """)
+    def _on_test_hud_clicked(self):
+        size = self.combo_size.currentData()
+        self.preview_hud_requested.emit(size)
+
+    def _apply_global_theme(self, theme: str = "dark"):
+        check_icon_path = str(Path(__file__).resolve().parent.parent.parent / "resources" / "check_white.png").replace("\\", "/")
+        self.setStyleSheet(f"""
+            SettingsWindow, QScrollArea, #BodyWidget {{
+                background-color: #1E1E20;
+                color: #F5F5F7;
+                font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", sans-serif;
+            }}
+            #HeaderFrame {{
+                background-color: #242426;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+            }}
+            #FooterFrame {{
+                background-color: #242426;
+                border-top: 1px solid rgba(255, 255, 255, 0.07);
+            }}
+            QLabel {{
+                color: #F5F5F7;
+                font-size: 13px;
+            }}
+            QLineEdit, QComboBox, QPlainTextEdit {{
+                background-color: #28282A;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 6px;
+                padding: 5px 8px;
+                color: #F5F5F7;
+                font-size: 13px;
+            }}
+            QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {{
+                border: 1px solid #FFFFFF;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                padding-right: 8px;
+            }}
+            QPushButton {{
+                background-color: #323236;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 6px;
+                padding: 5px 12px;
+                color: #F5F5F7;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background-color: #3C3C40;
+            }}
+            QCheckBox {{
+                color: #F5F5F7;
+                font-size: 13px;
+                spacing: 8px;
+            }}
+            QCheckBox::indicator {{
+                width: 17px;
+                height: 17px;
+                border-radius: 4px;
+                border: 1px solid rgba(255, 255, 255, 0.25);
+                background-color: #1A1A1D;
+            }}
+            QCheckBox::indicator:hover {{
+                border: 1px solid rgba(255, 255, 255, 0.45);
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: #0A84FF;
+                border: 1px solid #0A84FF;
+                image: url("{check_icon_path}");
+            }}
+        """)
+        self.btn_save.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #000000;
+                font-weight: 600;
+                padding: 6px 18px;
+                border-radius: 6px;
+                border: none;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #E5E5EA;
+            }
+        """)
+        self.btn_lang.setStyleSheet("""
+            QPushButton {
+                background-color: #2D2D30;
+                color: #FFFFFF;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 13px;
+                font-weight: 600;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #38383D;
+            }
+        """)
 
     def _save_settings(self):
         self.config["hotkey_main"] = getattr(self, "val_hotkey_main", self.config["hotkey_main"])
         self.config["hotkey_alt"] = getattr(self, "val_hotkey_alt", self.config["hotkey_alt"])
         self.config["hotkey_history"] = getattr(self, "val_hotkey_history", self.config["hotkey_history"])
 
+        # Recording Mode & Processing
+        self.config["recording_mode"] = self.combo_rec_mode.currentData()
+        self.config["sound_effects_enabled"] = self.chk_sound.isChecked()
+        self.config["smart_punctuation_enabled"] = self.chk_smart_punct.isChecked()
+        self.config["silence_timeout_seconds"] = self.combo_silence.currentData()
+
+        # Vocabulary Replacements
+        vocab_dict = {}
+        for line in self.txt_vocab.toPlainText().splitlines():
+            line = line.strip()
+            if "=" in line:
+                k, v = line.split("=", 1)
+                if k.strip() and v.strip():
+                    vocab_dict[k.strip()] = v.strip()
+        self.config["custom_replacements"] = vocab_dict
+
         self.config["enter_after_insert"] = self.chk_enter.isChecked()
+        self.config["autostart_with_windows"] = self.chk_autostart.isChecked()
+        set_autostart(self.chk_autostart.isChecked())
         self.config["paste_suffix"] = self.combo_suffix.currentData()
         self.config["microphone_device"] = self.combo_mic.currentData()
         self.config["export_folder"] = self.txt_export_folder.text()
@@ -837,7 +1115,7 @@ class SettingsWindow(QWidget):
         self.config["dictation_language"] = self.combo_dict_lang.currentData()
 
         self.config["capsule_size"] = self.combo_size.currentData()
-        self.config["capsule_theme"] = self.combo_theme.currentData()
+        self.config["capsule_theme"] = "dark"
 
         self.config["ai_cleanup_enabled"] = self.chk_ai.isChecked()
         self.config["ai_base_url"] = self.txt_ai_url.text().strip()
@@ -852,3 +1130,59 @@ class SettingsWindow(QWidget):
         self.config.save()
         self.settings_saved.emit()
         self.close()
+
+    def _start_mic_test_stream(self):
+        """Starts ephemeral sounddevice input stream to feed live mic level meter."""
+        self._stop_mic_test_stream()
+        dev_idx = self.combo_mic.currentData()
+        try:
+            import numpy as np
+            import sounddevice as sd
+
+            def audio_cb(indata, frames, time_info, status):
+                try:
+                    rms = float(np.sqrt(np.mean(np.square(indata))))
+                    vol = min(1.0, rms * 14.0)
+                    self.mic_level_signal.emit(vol)
+                except Exception:
+                    pass
+
+            extra_settings = AudioRecorder.get_extra_settings(dev_idx)
+            self._mic_test_stream = sd.InputStream(
+                device=dev_idx,
+                channels=1,
+                samplerate=16000,
+                blocksize=1024,
+                dtype="float32",
+                callback=audio_cb,
+                extra_settings=extra_settings
+            )
+            self._mic_test_stream.start()
+        except Exception as e:
+            print(f"[Settings] Could not start mic test stream: {e}")
+            self._mic_test_stream = None
+
+    def _stop_mic_test_stream(self):
+        """Stops mic test stream and resets VU meter."""
+        if self._mic_test_stream is not None:
+            try:
+                self._mic_test_stream.stop()
+                self._mic_test_stream.close()
+            except Exception:
+                pass
+            self._mic_test_stream = None
+        if hasattr(self, "meter_mic"):
+            self.meter_mic.reset()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._start_mic_test_stream()
+
+    def hideEvent(self, event):
+        self._stop_mic_test_stream()
+        super().hideEvent(event)
+
+    def closeEvent(self, event):
+        self._stop_mic_test_stream()
+        super().closeEvent(event)
+

@@ -1,90 +1,99 @@
 # Contributing to Dictatly
 
-Thank you for your interest in contributing to **Dictatly**! We welcome bug reports, feature suggestions, documentation improvements, and pull requests.
+Guidelines for development, architecture, testing, and submitting contributions.
 
 ---
 
-## 🛠️ Development Setup
+## Development Setup
 
 ### Prerequisites
-- **OS:** Windows 10 or Windows 11 (64-bit).
-- **Python:** Python 3.10, 3.11, or 3.12 (64-bit).
-- **GPU (Recommended):** NVIDIA GPU with CUDA 12 support (RTX 30-series or newer recommended for real-time FP16 inference). CPU mode with int8 quantization is also supported.
 
-### Getting Started
+- **Operating System:** Windows 10 (Build 19041+) or Windows 11 (64-bit).
+- **Python:** 3.10, 3.11, or 3.12 (64-bit).
+- **Hardware:** Microphone input. NVIDIA GPU with CUDA 12 support recommended for FP16 inference; multi-threaded CPU fallback is supported.
 
-1. **Fork and Clone:**
+### Setup
+
+1. Clone the repository:
    ```bash
-   git clone https://github.com/your-username/dictatly.git
-   cd dictatly
+   git clone https://github.com/21dkkk/Dictatly.git
+   cd Dictatly
    ```
 
-2. **Create a Virtual Environment:**
+2. Create and activate a virtual environment:
    ```bash
    python -m venv venv
    venv\Scripts\activate
    ```
 
-3. **Install Dependencies:**
+3. Install dependencies:
    ```bash
    pip install --upgrade pip
    pip install -r requirements.txt
    ```
 
-4. **Run the Application:**
+4. Launch the application in development:
    ```bash
-   # Background service
-   run.bat
+   # Run main tray application
+   python main.py
 
-   # Open Settings Panel
-   settings.bat
+   # Open Settings directly
+   python main.py --settings
 
-   # Open History Window
-   history.bat
+   # Open History directly
+   python main.py --history
    ```
 
 ---
 
-## 🧪 Running Tests
+## Testing
 
-Always verify that automated unit tests and UI tests pass before submitting a pull request:
+Always verify that automated unit and UI tests pass before submitting changes:
 
 ```bash
-# Run core test suite
+# Run core component tests
 python tests/test_all.py
 
-# Run UI test suite
+# Run UI tests (runs headless via offscreen QPA)
 python tests/test_ui.py
 ```
 
 ---
 
-## 📐 Design & Code Guidelines
+## Architecture & Code Guidelines
 
-- **Architecture:** Maintain clear modular boundaries between `core/` (Win32 APIs, audio, database, hotkeys), `engine/` (Whisper ASR, LLM cleaner), and `ui/` (PySide6 widgets).
-- **UI/UX Philosophy:** Follow Apple macOS Sequoia design guidelines:
-  - Warm neutral dark graphite (`#1E1E20`) and cards (`#28282A`).
-  - Subtle borders (`rgba(255, 255, 255, 0.08)`).
-  - 10px card radius, tactile 5px keycap styling.
-  - Native system typography (`-apple-system`, `SF Pro Display`, `Segoe UI Variable`).
-  - Zero AI-slop: avoid garish neon glows, oversized badges, and unnecessary boilerplate.
-- **Thread Safety:** Qt GUI operations must execute on the Qt main thread. Background audio capture, Whisper transcription, and network calls must run in worker threads using Qt signals.
+### Modular Separation
 
----
+- **`src/core/`**: Platform-level integrations (Win32 low-level hooks, caret tracking, text injection via clipboard simulation, audio stream capture, SQLite history database, DPAPI encryption). Keep UI-agnostic.
+- **`src/engine/`**: Speech recognition (`faster-whisper`) and optional text post-processing (`httpx`).
+- **`src/ui/`**: PySide6 widgets (floating HUD, settings panel, quick history, system tray).
+- **`src/localization.py`**: Dictionary for bilingual (RU / EN) string lookup.
 
-## 📝 Submitting Changes
+### Thread Safety & Concurrency
 
-1. Create a feature branch:
-   ```bash
-   git checkout -b feature/my-new-feature
-   ```
-2. Commit your changes with clear, descriptive commit messages:
-   ```bash
-   git commit -m "feat(injector): add thread input attachment for foreground recovery"
-   ```
-3. Push to your fork and submit a Pull Request.
+- All Qt widget manipulations and UI updates must execute on the main thread.
+- Audio streaming, model loading, transcription inference, and HTTP requests must run on worker threads and pass data back to UI components using Qt signals or thread-safe callbacks.
+- When stopping worker threads or Windows hook message loops, join threads with explicit timeouts to prevent race conditions during service restarts or shutdowns.
+
+### Win32 API Practices
+
+- When defining Win32 API functions via `ctypes`, declare explicit `argtypes` and `restype` signatures compatible with 64-bit Windows pointers (`DWORD`, `WPARAM`, `LPARAM`, `c_ulonglong`).
+- Ensure all allocated Windows resources (`GlobalAlloc`, `HHOOK`, mutexes) are freed or unhooked in `finally` blocks or explicit teardown methods.
 
 ---
 
-## 📄 License
+## Pull Request Process
+
+1. Create a descriptive feature branch:
+   ```bash
+   git checkout -b feature/issue-description
+   ```
+2. Make atomic, well-tested commits.
+3. Verify that all tests pass (`test_all.py` and `test_ui.py`).
+4. Push to your fork and submit a Pull Request describing the problem solved and the approach taken.
+
+---
+
+## License
+
 By contributing to Dictatly, you agree that your contributions will be licensed under the [MIT License](LICENSE).

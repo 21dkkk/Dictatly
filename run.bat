@@ -1,11 +1,18 @@
 @echo off
 cd /d "%~dp0"
 if not exist "venv\Scripts\python.exe" (
-    echo [ERROR] Virtual environment not found. Please install requirements.
+    echo [ERROR] Virtual environment not found.
+    echo Please install dependencies first:
+    echo   python -m venv venv
+    echo   venv\Scripts\activate
+    echo   pip install -r requirements.txt
     pause
     exit /b 1
 )
-:: Terminate existing background instance if running to load updated code
-"%~dp0venv\Scripts\python.exe" "%~dp0scripts\stop_existing.py" >nul 2>&1
 
-start "" "venv\Scripts\pythonw.exe" main.py %*
+if exist "%~dp0Dictatly.exe" (
+    start "" "%~dp0Dictatly.exe" %*
+) else (
+    start "" "venv\Scripts\pythonw.exe" main.py %*
+)
+

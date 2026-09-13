@@ -54,7 +54,7 @@ def encrypt_secret(plaintext: str) -> str:
     
     success = CryptProtectData(
         ctypes.byref(in_blob),
-        "SuperDictate_Key",
+        "Dictatly_Key",
         None,
         None,
         None,

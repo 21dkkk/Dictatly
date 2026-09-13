@@ -1,6 +1,6 @@
 """
-Configuration manager for SuperDictate Windows.
-Persists settings in %APPDATA%/SuperDictate/config.json.
+Configuration manager for Dictatly Windows.
+Persists settings in %APPDATA%/Dictatly/config.json.
 """
 
 import json
@@ -10,11 +10,14 @@ from pathlib import Path
 from typing import Any, Dict
 
 def get_app_data_dir() -> Path:
-    """Return platform app data directory: %APPDATA%/SuperDictate."""
+    """Return platform app data directory: %APPDATA%/Dictatly."""
     appdata = os.environ.get("APPDATA")
     if not appdata:
         appdata = str(Path.home() / "AppData" / "Roaming")
-    p = Path(appdata) / "SuperDictate"
+    p = Path(appdata) / "Dictatly"
+    old_p = Path(appdata) / "SuperDictate"
+    if not p.exists() and old_p.exists():
+        return old_p
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -28,14 +31,23 @@ def get_default_export_dir() -> Path:
     return Path.home()
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    # Hotkeys (Win32 Virtual Key names / codes)
+    # System & Launch
+    "autostart_with_windows": False,
+    "first_run_completed": False,
+
+    # Hotkeys & Mode
+    "recording_mode": "toggle",            # "toggle" (click-click) or "push_to_talk" (hold)
     "hotkey_main": "VK_RCONTROL",          # Right Control
     "hotkey_alt": "VK_RSHIFT+VK_RCONTROL",  # Alternative Finish (inverts Enter behavior)
     "hotkey_history": "VK_RMENU+VK_RCONTROL", # Quick History (Right Alt + Right Ctrl)
     
-    # Behavior
+    # Behavior & Processing
     "enter_after_insert": False,
     "paste_suffix": "space",                # "space", "none", "newline"
+    "sound_effects_enabled": True,          # Audio feedback on start/stop
+    "silence_timeout_seconds": 15,          # Auto-stop after N seconds of silence (0 to disable)
+    "smart_punctuation_enabled": True,      # Auto-capitalize first letter & clean double spaces
+    "custom_replacements": {},              # Custom user replacements { "term": "Replacement" }
     
     # Audio & Model
     "microphone_device": None,             # None = default input device
@@ -70,6 +82,15 @@ class AppConfig:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
                     self._data.update(loaded)
+                # Migrate older config that might contain initial hardcoded dictionary
+                old_sample = {"гитхаб": "GitHub", "пайтон": "Python", "питон": "Python", "докер": "Docker", "кубер": "Kubernetes", "постгрес": "PostgreSQL"}
+                if self._data.get("custom_replacements") == old_sample:
+                    self._data["custom_replacements"] = {}
+                    self.save()
+                # Enforce dark theme exclusively
+                if self._data.get("capsule_theme") != "dark":
+                    self._data["capsule_theme"] = "dark"
+                    self.save()
             except Exception as e:
                 print(f"[Config] Error loading config: {e}. Using defaults.")
         else:
@@ -93,3 +114,9 @@ class AppConfig:
 
     def __setitem__(self, key: str, value: Any):
         self.set(key, value)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._data
+
+    def __iter__(self):
+        return iter(self._data)

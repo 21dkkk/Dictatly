@@ -1,5 +1,5 @@
 """
-SuperDictate for Windows.
+Dictatly for Windows.
 Fast, private, local dictation with floating caret HUD, global hotkeys,
 hardware-accelerated Faster-Whisper, and optional AI cleanup.
 """
@@ -33,7 +33,7 @@ def setup_cuda_paths():
 setup_cuda_paths()
 
 from PySide6.QtGui import QIcon
-from src.app import SuperDictateApp
+from src.app import DictatlyApp
 
 def main():
     # Explicit Windows AppUserModelID for system toast notifications
@@ -73,12 +73,20 @@ def main():
     app.setApplicationName("Dictatly")
 
     # Global window icon
-    icon_path = BASE_DIR / "resources" / "app_icon_64.png"
+    icon_path = BASE_DIR / "resources" / "app_icon.ico"
+    if not icon_path.exists():
+        icon_path = BASE_DIR / "resources" / "app_icon_64.png"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
 
+    if "--install-shortcuts" in sys.argv:
+        from src.core.autostart import create_shortcuts
+        res = create_shortcuts(desktop=True, start_menu=True)
+        print(f"[Dictatly] Shortcuts created: {res}")
+        sys.exit(0)
+
     # Initialize Main App Coordinator
-    dictate_app = SuperDictateApp()
+    dictate_app = DictatlyApp()
 
     # If launched with --settings or --history
     if "--settings" in sys.argv:

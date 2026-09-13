@@ -1,7 +1,7 @@
 """
-Main Application Coordinator for SuperDictate Windows.
-Connects Audio capture, Hotkeys, Caret tracker, ASR Engine, AI Cleaner,
-Floating Capsule HUD, History, and Settings.
+Main Application Coordinator for Dictatly.
+Coordinates audio capture, global hotkeys, caret tracker, ASR engine, AI cleaner,
+floating capsule HUD, history, and settings.
 """
 
 import sys
@@ -21,14 +21,18 @@ from .core.hotkey import GlobalHotkeyManager, key_combo_to_display
 from .core.injector import inject_text
 from .core.database import HistoryDatabase
 from .core.security import decrypt_secret
+from .core.sound import play_audio_cue
+from .core.text_postprocess import apply_vocabulary, format_smart_punctuation
 from .engine.transcriber import SpeechTranscriber
 from .engine.ai_cleaner import AICleaner
 from .ui.hud import RecordingHUD, HUDState
 from .ui.history_window import QuickHistoryWindow
 from .ui.settings_window import SettingsWindow
+from .ui.onboarding_dialog import OnboardingDialog
 from .ui.tray import SystemTrayManager
+from .core.autostart import set_autostart
 
-class SuperDictateApp(QObject):
+class DictatlyApp(QObject):
     # Signals for thread-safe UI updates from background threads
     hud_state_signal = Signal(int)
     hud_volume_signal = Signal(float)
@@ -44,7 +48,10 @@ class SuperDictateApp(QObject):
         self.db = HistoryDatabase()
 
         # Core Engines
-        self.audio = AudioRecorder(device_index=self.config["microphone_device"])
+        self.audio = AudioRecorder(
+            device_index=self.config["microphone_device"],
+            silence_timeout_seconds=float(self.config.get("silence_timeout_seconds", 0))
+        )
         self.audio.on_volume_level = self._on_volume_level
 
         self.transcriber = SpeechTranscriber(
@@ -62,6 +69,7 @@ class SuperDictateApp(QObject):
             size_mode=self.config["capsule_size"],
             theme=self.config["capsule_theme"]
         )
+        self.hud_hwnd: int = int(self.hud.winId()) if self.hud else 0
         self.history_window: Optional[QuickHistoryWindow] = None
         self.settings_window: Optional[SettingsWindow] = None
         self.tray = SystemTrayManager(self.config)
@@ -80,6 +88,7 @@ class SuperDictateApp(QObject):
         # Connect Tray Actions
         self.tray.open_settings_requested.connect(self.show_settings)
         self.tray.open_history_requested.connect(self.toggle_history)
+        self.tray.toggle_pause_requested.connect(self._on_pause_hotkeys_toggled)
         self.tray.toggle_dictation_requested.connect(self.toggle_dictation)
         self.tray.exit_requested.connect(self.exit_app)
 
@@ -93,19 +102,41 @@ class SuperDictateApp(QObject):
         msg = f"Готов к работе. Нажмите {main_key_display} для записи." if lang == "ru" else f"Ready. Press {main_key_display} to dictate."
         QTimer.singleShot(800, lambda: self.tray.show_notification("Dictatly", msg))
 
+        # First-run onboarding check
+        self.onboarding_dialog: Optional[OnboardingDialog] = None
+        if not self.config.get("first_run_completed", False):
+            QTimer.singleShot(400, self.show_onboarding)
+        elif self.config.get("autostart_with_windows", False):
+            set_autostart(True)
+
     def _register_all_hotkeys(self):
         """Registers configured hotkeys."""
         self.hotkey_mgr.clear_hotkeys()
+        mode = self.config.get("recording_mode", "toggle")
 
         # 1. Main Hotkey
         main_key = self.config["hotkey_main"]
         if main_key:
-            self.hotkey_mgr.register_hotkey(main_key, lambda: self.toggle_dictation(inverted_enter=False))
+            if mode == "push_to_talk":
+                self.hotkey_mgr.register_hotkey_handlers(
+                    main_key,
+                    on_press=lambda: self._start_dictation(),
+                    on_release=lambda: self._finish_dictation(inverted_enter=False)
+                )
+            else:
+                self.hotkey_mgr.register_hotkey(main_key, lambda: self.toggle_dictation(inverted_enter=False))
 
         # 2. Alternative Finish Hotkey
         alt_key = self.config["hotkey_alt"]
         if alt_key:
-            self.hotkey_mgr.register_hotkey(alt_key, lambda: self.toggle_dictation(inverted_enter=True))
+            if mode == "push_to_talk":
+                self.hotkey_mgr.register_hotkey_handlers(
+                    alt_key,
+                    on_press=lambda: self._start_dictation(),
+                    on_release=lambda: self._finish_dictation(inverted_enter=True)
+                )
+            else:
+                self.hotkey_mgr.register_hotkey(alt_key, lambda: self.toggle_dictation(inverted_enter=True))
 
         # 3. Quick History Hotkey
         hist_key = self.config["hotkey_history"]
@@ -117,6 +148,11 @@ class SuperDictateApp(QObject):
         if self.audio.is_recording:
             self.hud_volume_signal.emit(vol)
 
+    def _on_silence_timeout(self):
+        """Auto-stop dictation when silence duration exceeds threshold."""
+        print("[App] Silence timeout reached, auto-stopping dictation.")
+        self._finish_dictation(inverted_enter=False)
+
     def toggle_dictation(self, inverted_enter: bool = False):
         """Toggles push-to-talk / toggle-to-talk recording."""
         if not self.audio.is_recording:
@@ -126,6 +162,12 @@ class SuperDictateApp(QObject):
 
     def _start_dictation(self):
         """Starts audio recording and displays HUD at caret position."""
+        if self.audio.is_recording:
+            return
+
+        # Arm silence timeout
+        self.audio.on_silence_timeout = self._on_silence_timeout
+
         # Capture target window handle right when dictation begins
         import ctypes
         self.target_hwnd = ctypes.windll.user32.GetForegroundWindow()
@@ -138,9 +180,38 @@ class SuperDictateApp(QObject):
         started = self.audio.start()
         if not started:
             self.hud_state_signal.emit(HUDState.IDLE)
+        else:
+            self.hotkey_mgr.on_escape_pressed = self._cancel_dictation
+            play_audio_cue("start", enabled=self.config.get("sound_effects_enabled", True))
+
+    def _cancel_dictation(self):
+        """Instantly cancels and discards the active dictation recording via Escape."""
+        if not self.audio.is_recording:
+            return
+        print("[App] Dictation cancelled via Escape key.")
+        self.hotkey_mgr.on_escape_pressed = None
+        self.audio.stop()
+        self.hud_state_signal.emit(HUDState.IDLE)
+        play_audio_cue("stop", enabled=self.config.get("sound_effects_enabled", True))
+
+    def _on_pause_hotkeys_toggled(self, paused: bool):
+        """Pauses or resumes global hotkeys (for gaming, calls, etc.)."""
+        if paused and self.audio.is_recording:
+            self._cancel_dictation()
+        self.hotkey_mgr.set_paused(paused)
+        lang = self.config.get("interface_language", "ru")
+        title = "Dictatly"
+        msg = t("tray_hotkeys_paused" if paused else "tray_hotkeys_resumed", lang)
+        self.tray.show_notification(title, msg)
 
     def _finish_dictation(self, inverted_enter: bool = False):
         """Stops recording, runs ASR, AI cleaning, and text injection."""
+        if not self.audio.is_recording:
+            return
+
+        self.hotkey_mgr.on_escape_pressed = None
+        play_audio_cue("stop", enabled=self.config.get("sound_effects_enabled", True))
+
         duration = self.audio.recording_duration
         audio_data = self.audio.stop()
 
@@ -161,9 +232,9 @@ class SuperDictateApp(QObject):
         import ctypes
         user32 = ctypes.windll.user32
         cur_fg = user32.GetForegroundWindow()
-        hud_hwnd = int(self.hud.winId()) if self.hud else 0
-        settings_hwnd = int(self.settings_window.winId()) if self.settings_window else 0
-        history_hwnd = int(self.history_window.winId()) if self.history_window else 0
+        hud_hwnd = self.hud_hwnd
+        settings_hwnd = int(self.settings_window.winId()) if (self.settings_window and self.settings_window.isVisible()) else 0
+        history_hwnd = int(self.history_window.winId()) if (self.history_window and self.history_window.isVisible()) else 0
 
         target_hwnd = self.target_hwnd
         if cur_fg and cur_fg not in (hud_hwnd, settings_hwnd, history_hwnd):
@@ -193,15 +264,20 @@ class SuperDictateApp(QObject):
                         text = cleaner.clean_text(text)
                         print(f"[App] After AI cleanup: {repr(text)}")
 
-                # 3. Text injection at cursor
+                # 3. Custom vocabulary & smart punctuation
+                replacements = self.config.get("custom_replacements", {})
+                text = apply_vocabulary(text, replacements)
+                text = format_smart_punctuation(text, enabled=self.config.get("smart_punctuation_enabled", True))
+
+                # 4. Text injection at cursor
                 suffix = self.config["paste_suffix"]
                 print(f"[App] Pasting text at active caret...")
                 inject_text(text, suffix_mode=suffix, press_enter=press_enter, target_hwnd=target_hwnd)
 
-                # 4. Save to history database
+                # 5. Save to history database
                 self.db.add_entry(text, duration=duration, source="mic")
 
-                # 5. Success state on HUD
+                # 6. Success state on HUD
                 self.hud_state_signal.emit(HUDState.SUCCESS)
                 time.sleep(0.24)
             except Exception as e:
@@ -233,18 +309,41 @@ class SuperDictateApp(QObject):
             self.settings_window = SettingsWindow(self.config, self.hotkey_mgr)
             self.settings_window.settings_saved.connect(self._on_settings_saved)
             self.settings_window.restart_service_requested.connect(self._restart_services)
+            self.settings_window.preview_hud_requested.connect(self._preview_hud)
 
         self.settings_window.show()
         self.settings_window.raise_()
         self.settings_window.activateWindow()
 
+    def _preview_hud(self, size_mode: str):
+        """Displays temporary HUD above settings window to preview size."""
+        self.hud.set_mode_and_theme(size_mode=size_mode, theme="dark")
+        if self.settings_window and self.settings_window.isVisible():
+            geo = self.settings_window.geometry()
+            cx = geo.center().x()
+            cy = geo.top() - 10
+            self.hud.move_to_caret(cx, cy)
+        self.hud.set_volume(0.65)
+        self.hud.set_state(HUDState.RECORDING)
+        QTimer.singleShot(2500, lambda: self.hud.set_state(HUDState.IDLE))
+
+    @Slot()
+    def show_onboarding(self):
+        """Show initial onboarding setup dialog."""
+        if self.onboarding_dialog is None:
+            self.onboarding_dialog = OnboardingDialog(self.config)
+        self.onboarding_dialog.show()
+        self.onboarding_dialog.raise_()
+        self.onboarding_dialog.activateWindow()
+
     def _on_settings_saved(self):
         """Apply newly saved settings."""
         self.hud.set_mode_and_theme(
             size_mode=self.config["capsule_size"],
-            theme=self.config["capsule_theme"]
+            theme="dark"
         )
         self.audio.set_device(self.config["microphone_device"])
+        self.audio.silence_timeout_seconds = float(self.config.get("silence_timeout_seconds", 0))
         self.tray.update_language()
         self._register_all_hotkeys()
 
@@ -258,11 +357,36 @@ class SuperDictateApp(QObject):
 
     def _restart_services(self):
         """Restarts hotkey hook and audio streams."""
-        self.hotkey_mgr.stop()
-        time.sleep(0.1)
-        self._register_all_hotkeys()
-        self.hotkey_mgr.start()
-        self.tray.show_notification("Dictatly", "Служба перезапущена / Service restarted")
+        def worker():
+            try:
+                # 1. Stop active recording if any and reset HUD
+                if self.audio.is_recording:
+                    self.audio.stop()
+                self.hud_state_signal.emit(HUDState.IDLE)
+
+                # 2. Reset and re-apply audio device
+                self.audio.set_device(self.config["microphone_device"])
+                self.audio.silence_timeout_seconds = float(self.config.get("silence_timeout_seconds", 0))
+
+                # 3. Stop and re-register global hotkey hook
+                self.hotkey_mgr.stop()
+                time.sleep(0.05)
+                self._register_all_hotkeys()
+                self.hotkey_mgr.start()
+
+                # 4. Notify UI of successful restart
+                if self.settings_window:
+                    QTimer.singleShot(0, lambda: self.settings_window.notify_service_restarted(True))
+
+                lang = self.config["interface_language"]
+                msg = t("service_restarted", lang)
+                self.tray.show_notification("Dictatly", msg)
+            except Exception as e:
+                print(f"[App] Error restarting services: {e}")
+                if self.settings_window:
+                    QTimer.singleShot(0, lambda: self.settings_window.notify_service_restarted(False, str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _start_batch_transcribe(self, file_paths: List[str]):
         """Processes drag & dropped audio files."""
@@ -271,7 +395,8 @@ class SuperDictateApp(QObject):
 
         self.history_window.progress_bar.setVisible(True)
         self.history_window.progress_bar.setValue(0)
-        self.history_window.drop_zone.setText(t("batch_processing", self.config["interface_language"]))
+        lang = self.config["interface_language"]
+        self.history_window.drop_zone.set_text(t("batch_processing", lang), "")
 
         export_dir = Path(self.config["export_folder"])
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -291,6 +416,10 @@ class SuperDictateApp(QObject):
                 )
                 
                 if text:
+                    replacements = self.config.get("custom_replacements", {})
+                    text = apply_vocabulary(text, replacements)
+                    text = format_smart_punctuation(text, enabled=self.config.get("smart_punctuation_enabled", True))
+
                     # Save .txt file in export folder
                     out_txt = export_dir / f"{path_obj.stem}.txt"
                     try:
@@ -311,14 +440,19 @@ class SuperDictateApp(QObject):
             self.history_window.progress_bar.setValue(percent)
 
     def _on_batch_finished(self):
+        lang = self.config["interface_language"]
         if self.history_window:
             self.history_window.progress_bar.setVisible(False)
-            self.history_window.drop_zone.setText(t("batch_import_hint", self.config["interface_language"]))
+            sub_hint = "Автоматическая транскрипция и экспорт в .txt" if lang == "ru" else "Automatic transcription and export to .txt"
+            self.history_window.drop_zone.set_text(t("batch_import_hint", lang), sub_hint)
             self.history_window.refresh_list()
-        self.tray.show_notification("Dictatly", "Пакетная транскрипция завершена! / Batch transcription complete!")
+        self.tray.show_notification("Dictatly", t("batch_complete", lang))
 
     def exit_app(self):
         """Clean shutdown."""
         self.hotkey_mgr.stop()
         self.audio.stop()
         QApplication.quit()
+
+# Backward-compatibility alias
+SuperDictateApp = DictatlyApp

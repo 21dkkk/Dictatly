@@ -1,5 +1,5 @@
 """
-System Tray Integration for SuperDictate Windows.
+System Tray Integration for Dictatly Windows.
 Provides tray icon, status notifications, and quick action context menu.
 """
 
@@ -48,6 +48,7 @@ class SystemTrayManager(QObject):
     open_settings_requested = Signal()
     open_history_requested = Signal()
     toggle_dictation_requested = Signal()
+    toggle_pause_requested = Signal(bool)
     exit_requested = Signal()
 
     def __init__(self, config: AppConfig):
@@ -95,6 +96,7 @@ class SystemTrayManager(QObject):
 
     def _build_menu(self):
         lang = self.config["interface_language"]
+        was_paused = self.act_pause.isChecked() if hasattr(self, "act_pause") else False
         self.menu.clear()
 
         # Title (disabled)
@@ -112,6 +114,12 @@ class SystemTrayManager(QObject):
 
         self.menu.addSeparator()
 
+        # Pause Global Hotkeys (Gaming / Calls)
+        self.act_pause = self.menu.addAction(t("tray_pause_hotkeys", lang))
+        self.act_pause.setCheckable(True)
+        self.act_pause.setChecked(was_paused)
+        self.act_pause.toggled.connect(self.toggle_pause_requested.emit)
+
         # Toggle Dictation
         act_toggle = self.menu.addAction(t("tray_toggle_dictation", lang))
         act_toggle.triggered.connect(self.toggle_dictation_requested.emit)
@@ -121,6 +129,12 @@ class SystemTrayManager(QObject):
         # Exit
         act_exit = self.menu.addAction(t("tray_exit", lang))
         act_exit.triggered.connect(self.exit_requested.emit)
+
+    def set_paused(self, paused: bool):
+        if hasattr(self, "act_pause"):
+            self.act_pause.blockSignals(True)
+            self.act_pause.setChecked(paused)
+            self.act_pause.blockSignals(False)
 
     def _on_tray_activated(self, reason):
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):

@@ -29,6 +29,15 @@ def setup_cuda_dll_path():
 
 setup_cuda_dll_path()
 
+def get_model_cache_dir() -> str:
+    """Return model cache dir, preserving existing downloads from superdictate if present."""
+    primary = Path.home() / ".cache" / "dictatly" / "models"
+    fallback = Path.home() / ".cache" / "superdictate" / "models"
+    if not primary.exists() and fallback.exists():
+        return str(fallback)
+    primary.mkdir(parents=True, exist_ok=True)
+    return str(primary)
+
 class SpeechTranscriber:
     def __init__(self, model_size: str = "large-v3-turbo", device_pref: str = "auto"):
         self.model_size = model_size
@@ -75,7 +84,7 @@ class SpeechTranscriber:
                     device=self.active_device,
                     compute_type=self.active_compute_type,
                     cpu_threads=threads,
-                    download_root=str(Path.home() / ".cache" / "superdictate" / "models")
+                    download_root=get_model_cache_dir()
                 )
                 print(f"[ASR] Model loaded in {time.time() - start_t:.2f}s.")
             except Exception as e:
@@ -90,7 +99,7 @@ class SpeechTranscriber:
                         device="cpu",
                         compute_type="int8",
                         cpu_threads=threads,
-                        download_root=str(Path.home() / ".cache" / "superdictate" / "models")
+                        download_root=get_model_cache_dir()
                     )
                 except Exception as ex:
                     print(f"[ASR] Fatal error loading model: {ex}")
