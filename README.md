@@ -61,14 +61,14 @@ All processing runs locally on your device. Audio and transcribed text are store
                         ▼                               ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                         INFERENCE & TRANSCRIPTION                        │
-│          faster-whisper Engine (NVIDIA CUDA FP16 / Multi-Core CPU)        │
+│          faster-whisper Engine (NVIDIA CUDA FP16 / Multi-Core CPU)       │
 └───────────────────────────────────────┬──────────────────────────────────┘
                                         ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                         TEXT POST-PROCESSING PIPELINE                    │
 │   • Smart Punctuation & Capitalization (Preserves Decimals and Clock)    │
-│   • Custom Vocabulary Dictionary (e.g., 'пайтон' -> 'Python')             │
-│   • Optional DPAPI-Secured Cloud AI Post-Processor                        │
+│   • Custom Vocabulary Dictionary (e.g., 'пайтон' -> 'Python')            │
+│   • Optional DPAPI-Secured Cloud AI Post-Processor                       │
 └───────────────────────┬───────────────────────────────┬──────────────────┘
                         │                               │
                         ▼                               ▼
