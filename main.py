@@ -35,6 +35,63 @@ setup_cuda_paths()
 from PySide6.QtGui import QIcon
 from src.app import DictatlyApp
 
+_GLOBAL_MUTEX = None
+
+def release_single_instance_mutex():
+    """Explicitly release and close the Windows single instance mutex."""
+    global _GLOBAL_MUTEX
+    if _GLOBAL_MUTEX:
+        try:
+            ctypes.windll.kernel32.CloseHandle(_GLOBAL_MUTEX)
+        except Exception:
+            pass
+        _GLOBAL_MUTEX = None
+
+def acquire_single_instance_mutex() -> bool:
+    """Acquire single instance mutex, retrying during restarts if needed."""
+    global _GLOBAL_MUTEX
+    import time
+    mutex_name = "Global\\Dictatly_SingleInstance_Mutex"
+    kernel32 = ctypes.windll.kernel32
+
+    # If restart flag present, give prior instance a brief grace period to release mutex
+    max_attempts = 15 if any(arg in sys.argv for arg in ("--restart", "--settings", "--history")) else 1
+    for attempt in range(max_attempts):
+        mutex = kernel32.CreateMutexW(None, False, mutex_name)
+        last_error = kernel32.GetLastError()
+        if last_error != 183:  # 183 = ERROR_ALREADY_EXISTS
+            _GLOBAL_MUTEX = mutex
+            return True
+        kernel32.CloseHandle(mutex)
+        time.sleep(0.1)
+
+    # If still busy and invoked with explicit restart/command flag, terminate previous instances cleanly
+    if any(arg in sys.argv for arg in ("--settings", "--history", "--restart")):
+        import subprocess
+        try:
+            current_pid = os.getpid()
+            ps_script = (
+                f"Get-CimInstance Win32_Process | "
+                f"Where-Object {{ ($_.Name -eq 'Dictatly.exe' -or $_.CommandLine -like '*main.py*') -and $_.ProcessId -ne {current_pid} }} | "
+                f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
+            )
+            creation_flags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                capture_output=True,
+                timeout=3,
+                creationflags=creation_flags
+            )
+        except Exception:
+            pass
+
+        time.sleep(0.15)
+        mutex = kernel32.CreateMutexW(None, False, mutex_name)
+        _GLOBAL_MUTEX = mutex
+        return True
+
+    return False
+
 def main():
     # Explicit Windows AppUserModelID for system toast notifications
     try:
@@ -42,26 +99,9 @@ def main():
     except Exception:
         pass
 
-    # Windows Single Instance Mutex
-    mutex_name = "Global\\Dictatly_SingleInstance_Mutex"
-    kernel32 = ctypes.windll.kernel32
-    mutex = kernel32.CreateMutexW(None, False, mutex_name)
-    last_error = kernel32.GetLastError()
-    
-    # 183 = ERROR_ALREADY_EXISTS
-    if last_error == 183:
-        if any(arg in sys.argv for arg in ("--settings", "--history", "--restart")):
-            # Terminate older instance and take over
-            import subprocess
-            subprocess.run([
-                "powershell", "-NoProfile", "-Command",
-                f"Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*main.py*' -and $_.ProcessId -ne {os.getpid()} }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
-            ], capture_output=True)
-            kernel32.CloseHandle(mutex)
-            mutex = kernel32.CreateMutexW(None, False, mutex_name)
-        else:
-            print("[Dictatly] Another instance is already running.")
-            sys.exit(0)
+    if not acquire_single_instance_mutex():
+        print("[Dictatly] Another instance is already running.")
+        sys.exit(0)
 
     # Enable High-DPI scaling
     QApplication.setHighDpiScaleFactorRoundingPolicy(

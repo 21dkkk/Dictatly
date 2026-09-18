@@ -2,8 +2,10 @@
 Self-test suite for Dictatly Windows components.
 """
 
+import os
 import sys
 import unittest
+import tempfile
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -42,13 +44,39 @@ class TestDictatly(unittest.TestCase):
         self.assertEqual(sample_key, decrypted)
 
     def test_database(self):
-        db = HistoryDatabase()
-        entry_id = db.add_entry("Тестовая транскрипция Dictatly", duration=2.5, source="test")
-        self.assertTrue(entry_id > 0)
-        entries = db.get_entries(page=1, page_size=5)
-        self.assertTrue(len(entries) > 0)
-        self.assertEqual(entries[0]["text"], "Тестовая транскрипция Dictatly")
-        db.delete_entry(entry_id)
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            db = HistoryDatabase(db_path=tmp_path)
+            entry_id = db.add_entry("Тестовая транскрипция Dictatly", duration=2.5, source="test")
+            self.assertTrue(entry_id > 0)
+            entries = db.get_entries(page=1, page_size=5)
+            self.assertTrue(len(entries) > 0)
+            self.assertEqual(entries[0]["text"], "Тестовая транскрипция Dictatly")
+
+            # Test rich analytics methods
+            summary = db.get_analytics_summary()
+            self.assertIn("today_words", summary)
+            self.assertIn("today_minutes_saved", summary)
+            self.assertIn("avg_wpm", summary)
+            self.assertIn("speed_multiplier", summary)
+            self.assertGreaterEqual(summary["today_words"], 3)
+
+            daily = db.get_daily_activity(7)
+            self.assertEqual(len(daily), 7)
+            self.assertTrue(daily[-1]["is_today"])
+            self.assertIn("day_ru", daily[0])
+            self.assertIn("day_en", daily[0])
+
+            hourly = db.get_hourly_activity()
+            self.assertEqual(len(hourly), 24)
+            self.assertEqual(hourly[0]["hour"], 0)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     def test_caret_tracker(self):
         x, y = get_caret_screen_position()
@@ -132,36 +160,46 @@ class TestDictatly(unittest.TestCase):
     def test_database_concurrent_access(self):
         """Stress test SQLite database thread safety with concurrent readers and writers."""
         import threading
-        db = HistoryDatabase()
-        errors = []
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            tmp_path = tmp.name
 
-        def writer(worker_id: int):
+        try:
+            db = HistoryDatabase(tmp_path)
+            errors = []
+
+            def writer(worker_id: int):
+                try:
+                    for i in range(10):
+                        db.add_entry(f"Concurrent transcript worker {worker_id} iter {i}", duration=1.0)
+                except Exception as e:
+                    errors.append(f"Writer error: {e}")
+
+            def reader():
+                try:
+                    for _ in range(10):
+                        db.get_entries(page=1, page_size=5)
+                        db.get_today_stats()
+                        db.get_total_count()
+                except Exception as e:
+                    errors.append(f"Reader error: {e}")
+
+            threads = []
+            for i in range(4):
+                threads.append(threading.Thread(target=writer, args=(i,)))
+                threads.append(threading.Thread(target=reader))
+
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            self.assertEqual(len(errors), 0, f"Concurrent database access caused errors: {errors}")
+        finally:
             try:
-                for i in range(10):
-                    db.add_entry(f"Concurrent transcript worker {worker_id} iter {i}", duration=1.0)
-            except Exception as e:
-                errors.append(f"Writer error: {e}")
-
-        def reader():
-            try:
-                for _ in range(10):
-                    db.get_entries(page=1, page_size=5)
-                    db.get_today_stats()
-                    db.get_total_count()
-            except Exception as e:
-                errors.append(f"Reader error: {e}")
-
-        threads = []
-        for i in range(4):
-            threads.append(threading.Thread(target=writer, args=(i,)))
-            threads.append(threading.Thread(target=reader))
-
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        self.assertEqual(len(errors), 0, f"Concurrent database access caused errors: {errors}")
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
     def test_audio_cue(self):
         # Disabled cue should return False immediately
@@ -175,14 +213,23 @@ class TestDictatly(unittest.TestCase):
         self.assertTrue(res_stop)
 
     def test_database_today_stats(self):
-        db = HistoryDatabase()
-        db.add_entry("Тестирование подсчета слов и продуктивности в быстрой истории", duration=3.0, source="test")
-        stats = db.get_today_stats()
-        self.assertIsInstance(stats, dict)
-        self.assertIn("words", stats)
-        self.assertIn("minutes_saved", stats)
-        self.assertGreaterEqual(stats["words"], 7)
-        self.assertGreaterEqual(stats["count"], 1)
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            db = HistoryDatabase(db_path=tmp_path)
+            db.add_entry("Тестирование подсчета слов и продуктивности в быстрой истории", duration=3.0, source="test")
+            stats = db.get_today_stats()
+            self.assertIsInstance(stats, dict)
+            self.assertIn("words", stats)
+            self.assertIn("minutes_saved", stats)
+            self.assertGreaterEqual(stats["words"], 7)
+            self.assertGreaterEqual(stats["count"], 1)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     def test_hotkey_pause_and_escape(self):
         mgr = GlobalHotkeyManager()

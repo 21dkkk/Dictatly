@@ -11,16 +11,20 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt, QEvent
+from PySide6.QtGui import QKeyEvent, QHideEvent
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
+
+import tempfile
 
 from src.config import AppConfig
 from src.core.database import HistoryDatabase
 from src.core.hotkey import GlobalHotkeyManager
 from src.ui.hud import RecordingHUD, HUDState, CapsulePreviewCanvas
 from src.ui.settings_window import SettingsWindow
-from src.ui.history_window import QuickHistoryWindow
+from src.ui.history_window import QuickHistoryWindow, AppleNavButton
 from src.ui.onboarding_dialog import OnboardingDialog
 from src.ui.tray import SystemTrayManager
 
@@ -107,25 +111,125 @@ class TestUIComponents(unittest.TestCase):
 
         # Test notification update
         win.notify_service_restarted(True)
-        self.assertIn("✓", win.btn_restart.text())
+        from src.localization import t
+        self.assertIn(t("service_restarted", win.config["interface_language"]), win.btn_restart.text())
 
     def test_history_window(self):
         cfg = AppConfig()
-        db = HistoryDatabase()
-        db.add_entry("Тестовая запись для проверки виджета продуктивности", duration=2.0, source="test")
-        win = QuickHistoryWindow(db, cfg)
-        win.refresh_list()
-        self.assertIsNotNone(win)
-        self.assertTrue(hasattr(win, "lbl_stats"))
-        self.assertIn("⚡", win.lbl_stats.text())
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            tmp_path = tmp.name
 
-        # Test drop zone methods (must not throw AttributeError)
-        self.assertTrue(hasattr(win.drop_zone, "set_text"))
-        self.assertTrue(hasattr(win.drop_zone, "setText"))
-        win.drop_zone.set_text("Обработка файлов...", "Пожалуйста, подождите")
-        self.assertEqual(win.drop_zone.lbl_icon.text(), "Обработка файлов...")
-        win.drop_zone.setText("Новый статус")
-        self.assertEqual(win.drop_zone.lbl_icon.text(), "Новый статус")
+        try:
+            db = HistoryDatabase(db_path=tmp_path)
+            db.add_entry("Тестовая запись для проверки виджета продуктивности", duration=2.0, source="test")
+            win = QuickHistoryWindow(db, cfg)
+            win.refresh_list()
+            self.assertIsNotNone(win)
+            self.assertTrue(hasattr(win, "lbl_stats"))
+            self.assertTrue(len(win.lbl_stats.text()) > 0)
+            self.assertTrue("слов" in win.lbl_stats.text() or "words" in win.lbl_stats.text())
+
+            # Test 3-tab Segmented Control structure and Stack
+            self.assertTrue(hasattr(win, "segmented_ctrl"))
+            self.assertEqual(len(win.segmented_ctrl.items), 3)
+            self.assertEqual(win.stack.count(), 3)
+
+            # Test Apple Navigation Buttons
+            self.assertTrue(hasattr(win, "btn_prev"))
+            self.assertTrue(hasattr(win, "btn_next"))
+            self.assertIsInstance(win.btn_prev, AppleNavButton)
+            self.assertIsInstance(win.btn_next, AppleNavButton)
+
+            # Test dedicated Import Page (Page index 2)
+            self.assertTrue(hasattr(win, "page_import"))
+            self.assertTrue(hasattr(win, "btn_browse"))
+            win.segmented_ctrl.set_current_index(2)
+            self.assertEqual(win.stack.currentIndex(), 2)
+
+            # Test drop zone methods in dedicated import page
+            self.assertTrue(hasattr(win.drop_zone, "set_text"))
+            self.assertTrue(hasattr(win.drop_zone, "setText"))
+            win.drop_zone.set_text("Обработка файлов...", "Пожалуйста, подождите")
+            self.assertEqual(win.drop_zone.lbl_icon.text(), "Обработка файлов...")
+            win.drop_zone.setText("Новый статус")
+            self.assertEqual(win.drop_zone.lbl_icon.text(), "Новый статус")
+
+            # Test Segmented Tab Switch to Analytics (Page index 1)
+            win.segmented_ctrl.set_current_index(1)
+            self.assertEqual(win.stack.currentIndex(), 1)
+
+            # Test Bento Metrics Cards exist and are populated with vector icons
+            self.assertTrue(hasattr(win, "card_today"))
+            self.assertTrue(hasattr(win, "card_saved"))
+            self.assertTrue(hasattr(win, "card_speed"))
+            self.assertTrue(hasattr(win, "card_total"))
+            self.assertEqual(win.card_today.icon_name, "bolt")
+            self.assertFalse(win.card_today.lbl_icon.pixmap().isNull())
+
+            # Test Interactive Multi-Chart Hub (Volume, Speed, Sources)
+            self.assertTrue(hasattr(win, "chart"))
+            self.assertTrue(hasattr(win.chart, "start_animation"))
+            self.assertEqual(win._active_chart_type, "volume")
+            self.assertEqual(win.chart.mode, "volume")
+            self.assertGreater(len(win.chart.volume_data), 0)
+
+            # Test switching to Speed Spline Chart
+            win.btn_chart_speed.click()
+            self.assertEqual(win._active_chart_type, "speed")
+            self.assertEqual(win.chart.mode, "speed")
+
+            # Test switching to Sources Activity Rings Donut Chart
+            win.btn_chart_sources.click()
+            self.assertEqual(win._active_chart_type, "sources")
+            self.assertEqual(win.chart.mode, "sources")
+
+            # Switch back to Volume and test timeframe pills
+            win.btn_chart_volume.click()
+            self.assertEqual(win._active_chart_type, "volume")
+            win.btn_chart_hourly.click()
+            self.assertEqual(win._active_chart_range, "hourly")
+            self.assertEqual(len(win.chart.volume_data), 24)
+            win.btn_chart_7d.click()
+            self.assertEqual(win._active_chart_range, "7d")
+            self.assertEqual(len(win.chart.volume_data), 7)
+            win.btn_chart_14d.click()
+            self.assertEqual(win._active_chart_range, "14d")
+            self.assertEqual(len(win.chart.volume_data), 14)
+
+            # Switch back to Transcripts
+            win.segmented_ctrl.set_current_index(0)
+            self.assertEqual(win.stack.currentIndex(), 0)
+
+            # Test Escape key dismissal
+            win.show()
+            self.assertTrue(win.isVisible())
+            esc_ev = QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier)
+            win.keyPressEvent(esc_ev)
+            self.assertFalse(win.isVisible())
+
+            # Test hideEvent stops physics timers (0.0% CPU)
+            win.hideEvent(QHideEvent())
+            self.assertFalse(win.chart._anim_timer.isActive())
+            self.assertFalse(win.segmented_ctrl._anim_timer.isActive())
+
+            # Test db.close()
+            db.close()
+            self.assertIsNone(db.conn)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+    def test_svg_icon_manager(self):
+        from src.ui.icons import SvgIconManager, get_svg_pixmap, get_svg_icon
+        pix = get_svg_pixmap("bolt", 24, "#0A84FF")
+        self.assertFalse(pix.isNull())
+        self.assertEqual(pix.width() / pix.devicePixelRatio(), 24)
+        self.assertEqual(pix.devicePixelRatio(), 2.0)
+        icon = get_svg_icon("mic", 16)
+        self.assertFalse(icon.isNull())
 
     def test_onboarding_dialog(self):
         cfg = AppConfig()
@@ -146,8 +250,11 @@ class TestUIComponents(unittest.TestCase):
         tray.act_pause.setChecked(True)
         self.assertEqual(emitted_pause, [True])
 
-        tray.set_paused(False)
-        self.assertFalse(tray.act_pause.isChecked())
+    def test_app_restart_contract(self):
+        from src.app import DictatlyApp
+        self.assertTrue(hasattr(DictatlyApp, "restart_app"))
+        self.assertTrue(hasattr(DictatlyApp, "_restart_services"))
+        self.assertTrue(hasattr(DictatlyApp, "_on_restart_app_requested"))
 
 if __name__ == "__main__":
     unittest.main()

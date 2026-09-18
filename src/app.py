@@ -99,7 +99,7 @@ class DictatlyApp(QObject):
         # Startup notification
         lang = self.config["interface_language"]
         main_key_display = key_combo_to_display(self.config["hotkey_main"])
-        msg = f"Готов к работе. Нажмите {main_key_display} для записи." if lang == "ru" else f"Ready. Press {main_key_display} to dictate."
+        msg = t("app_ready_notification", lang, hotkey=main_key_display)
         QTimer.singleShot(800, lambda: self.tray.show_notification("Dictatly", msg))
 
         # First-run onboarding check
@@ -308,7 +308,7 @@ class DictatlyApp(QObject):
         if self.settings_window is None:
             self.settings_window = SettingsWindow(self.config, self.hotkey_mgr)
             self.settings_window.settings_saved.connect(self._on_settings_saved)
-            self.settings_window.restart_service_requested.connect(self._restart_services)
+            self.settings_window.restart_service_requested.connect(self._on_restart_app_requested)
             self.settings_window.preview_hud_requested.connect(self._preview_hud)
 
         self.settings_window.show()
@@ -355,8 +355,59 @@ class DictatlyApp(QObject):
             self.transcriber._model = None
             threading.Thread(target=self.transcriber.load_model, daemon=True).start()
 
+    def _on_restart_app_requested(self):
+        """Handler for restart requested from Settings."""
+        # Allow UI button to render 'Restarting...' state briefly, then launch replacement
+        QTimer.singleShot(150, lambda: self.restart_app(reopen_settings=True))
+
+    def restart_app(self, reopen_settings: bool = True):
+        """Cleanly terminates current process and launches a fresh Dictatly instance."""
+        import subprocess
+        from .core.autostart import get_pythonw_executable, get_project_root
+
+        # 1. Stop active recording & keyboard hook
+        try:
+            if self.audio.is_recording:
+                self.audio.stop()
+            self.hotkey_mgr.stop()
+        except Exception:
+            pass
+
+        # 2. Release single instance mutex so new instance doesn't collide
+        try:
+            from main import release_single_instance_mutex
+            release_single_instance_mutex()
+        except Exception:
+            pass
+
+        # 3. Format launch command line
+        root_dir = get_project_root()
+        args = ["--restart"]
+        if reopen_settings:
+            args.append("--settings")
+
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable] + args
+        else:
+            py_exe = str(get_pythonw_executable())
+            main_py = str(root_dir / "main.py")
+            cmd = [py_exe, main_py] + args
+
+        # 4. Launch new detached process
+        try:
+            creation_flags = 0
+            if sys.platform == "win32":
+                creation_flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            subprocess.Popen(cmd, cwd=str(root_dir), creationflags=creation_flags)
+        except Exception as e:
+            print(f"[App] Failed to spawn restart process: {e}")
+
+        # 5. Terminate current process
+        QApplication.quit()
+        sys.exit(0)
+
     def _restart_services(self):
-        """Restarts hotkey hook and audio streams."""
+        """Restarts hotkey hook and audio streams in-place."""
         def worker():
             try:
                 # 1. Stop active recording if any and reset HUD
@@ -380,7 +431,7 @@ class DictatlyApp(QObject):
 
                 lang = self.config["interface_language"]
                 msg = t("service_restarted", lang)
-                self.tray.show_notification("Dictatly", msg)
+                QTimer.singleShot(0, lambda: self.tray.show_notification("Dictatly", msg))
             except Exception as e:
                 print(f"[App] Error restarting services: {e}")
                 if self.settings_window:
@@ -443,7 +494,7 @@ class DictatlyApp(QObject):
         lang = self.config["interface_language"]
         if self.history_window:
             self.history_window.progress_bar.setVisible(False)
-            sub_hint = "Автоматическая транскрипция и экспорт в .txt" if lang == "ru" else "Automatic transcription and export to .txt"
+            sub_hint = t("batch_drop_sub_finished", lang)
             self.history_window.drop_zone.set_text(t("batch_import_hint", lang), sub_hint)
             self.history_window.refresh_list()
         self.tray.show_notification("Dictatly", t("batch_complete", lang))
@@ -452,6 +503,8 @@ class DictatlyApp(QObject):
         """Clean shutdown."""
         self.hotkey_mgr.stop()
         self.audio.stop()
+        if hasattr(self, "db") and self.db:
+            self.db.close()
         QApplication.quit()
 
 # Backward-compatibility alias

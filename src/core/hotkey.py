@@ -353,13 +353,25 @@ class GlobalHotkeyManager:
         self._thread.start()
 
     def stop(self):
-        """Stop the hook and exit message loop."""
-        if self._hook:
-            user32.UnhookWindowsHookEx(self._hook)
-            self._hook = None
-        if self._thread_id:
-            user32.PostThreadMessageW(self._thread_id, 0x0012, 0, 0)  # WM_QUIT
-            self._thread_id = None
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+        """Stop the hook and exit message loop cleanly."""
+        hook = self._hook
+        self._hook = None
+        if hook:
+            try:
+                user32.UnhookWindowsHookEx(hook)
+            except Exception:
+                pass
+
+        tid = self._thread_id
+        self._thread_id = None
+        if tid:
+            try:
+                user32.PostThreadMessageW(tid, 0x0012, 0, 0)  # WM_QUIT
+            except Exception:
+                pass
+
+        thread = self._thread
         self._thread = None
+        if thread and thread.is_alive():
+            thread.join(timeout=0.4)
+

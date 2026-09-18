@@ -27,6 +27,7 @@ from ..core.security import encrypt_secret, decrypt_secret
 from ..core.autostart import is_autostart_enabled, set_autostart, create_shortcuts
 from ..engine.ai_cleaner import AICleaner
 from .hud import CapsulePreviewCanvas, HUDState
+from .icons import get_svg_icon
 
 # Keycap modifier glyph mappings (Apple style)
 KEY_GLYPHS = {
@@ -901,23 +902,25 @@ class SettingsWindow(QWidget):
         cleaner = AICleaner(base_url=url, model=model, api_key=key)
         ok, msg = cleaner.test_connection()
         if ok:
-            self.lbl_conn_status.setText(f"✓ {t('connection_ok', lang)}")
+            self.lbl_conn_status.setText(t('connection_ok', lang))
             self.lbl_conn_status.setStyleSheet("color: #34C759; font-weight: 500;")
         else:
-            self.lbl_conn_status.setText(f"✗ {t('connection_failed', lang)}: {msg}")
+            self.lbl_conn_status.setText(f"{t('connection_failed', lang)}: {msg}")
             self.lbl_conn_status.setStyleSheet("color: #FF453A;")
 
     def _on_restart_clicked(self):
         self.btn_restart.setEnabled(False)
         lang = self.config["interface_language"]
         self.btn_restart.setText(t("restarting_service", lang))
+        self.btn_restart.setIcon(QIcon())
         self.restart_service_requested.emit()
 
     def notify_service_restarted(self, success: bool = True, message: str = ""):
         lang = self.config["interface_language"]
         theme = self.config["capsule_theme"]
         if success:
-            self.btn_restart.setText(f"✓ {t('service_restarted', lang)}")
+            self.btn_restart.setIcon(get_svg_icon("check", 14, "#34C759"))
+            self.btn_restart.setText(t('service_restarted', lang))
             if theme == "dark":
                 self.btn_restart.setStyleSheet("""
                     QPushButton {
@@ -943,7 +946,8 @@ class SettingsWindow(QWidget):
                     }
                 """)
         else:
-            self.btn_restart.setText(f"✗ {t('connection_failed', lang)}")
+            self.btn_restart.setIcon(get_svg_icon("close", 14, "#FF453A"))
+            self.btn_restart.setText(t('connection_failed', lang))
             self.btn_restart.setStyleSheet("""
                 QPushButton {
                     background-color: #3A1E1E;
@@ -958,6 +962,7 @@ class SettingsWindow(QWidget):
 
         def revert():
             self.btn_restart.setEnabled(True)
+            self.btn_restart.setIcon(QIcon())
             self.btn_restart.setStyleSheet("")
             self.btn_restart.setText(t("restart_service", self.config["interface_language"]))
 
@@ -971,8 +976,12 @@ class SettingsWindow(QWidget):
     def _create_app_shortcuts(self):
         create_shortcuts(desktop=True, start_menu=True)
         lang = self.config["interface_language"]
-        self.btn_shortcuts.setText(f"✓ {t('shortcuts_created', lang)}")
-        QTimer.singleShot(2500, lambda: self.btn_shortcuts.setText(t("create_shortcuts", self.config["interface_language"])))
+        self.btn_shortcuts.setIcon(get_svg_icon("check", 14, "#34C759"))
+        self.btn_shortcuts.setText(t('shortcuts_created', lang))
+        def revert_shortcuts():
+            self.btn_shortcuts.setIcon(QIcon())
+            self.btn_shortcuts.setText(t("create_shortcuts", self.config["interface_language"]))
+        QTimer.singleShot(2500, revert_shortcuts)
 
     def _toggle_language(self):
         new_lang = "en" if self.config["interface_language"] == "ru" else "ru"
