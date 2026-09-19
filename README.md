@@ -125,16 +125,56 @@ All processing runs locally on your device. Audio and transcribed text are store
 
 ---
 
-## Quick Start Guide
+## Installation & Quick Start
 
-### 1. Clone the Repository
+Choose the installation method that fits your workflow:
+
+### Method 1: Windows Installer (Recommended)
+
+The easiest setup for everyday users. No Python, Git, or command-line experience required.
+
+1. Go to **[GitHub Releases](https://github.com/21dkkk/Dictatly/releases/latest)**.
+2. Download **`Dictatly-Setup.exe`** (or the portable archive `Dictatly-Portable.zip`).
+3. Run the installer and follow the setup wizard. Shortcuts will automatically be placed on your Desktop and in the Start Menu.
+
+> [!NOTE]
+> **Why is the installer ~1.8 GB?**
+> The installer bundles the complete offline Faster-Whisper `large-v3-turbo` speech recognition model together with NVIDIA CUDA and cuDNN hardware acceleration runtimes. Dictatly works **100% locally and privately** right after installation, without requiring extra downloads or network access.
+
+---
+
+### Method 2: One-Line PowerShell Command
+
+Automated installation without manual cloning or dependency setup.
+
+1. Press <kbd>Win</kbd> + <kbd>R</kbd>, type `powershell`, and hit <kbd>Enter</kbd>.
+2. Run the following command:
+
+```powershell
+irm https://raw.githubusercontent.com/21dkkk/Dictatly/main/install.ps1 | iex
+```
+
+The installer script will:
+- Check for Python 3.10+ (and auto-install it via `winget` if missing);
+- Deploy the latest application files to `%LOCALAPPDATA%\Dictatly`;
+- Create an isolated virtual environment (`venv`) and install dependencies;
+- Pre-cache the `large-v3-turbo` model for zero-delay speech recognition;
+- Create Desktop and Start Menu shortcuts.
+
+---
+
+### Method 3: Developer Setup (Git + Python)
+
+For developers looking to contribute, customize, or inspect the codebase:
+
+#### 1. Clone the Repository
 
 ```powershell
 git clone https://github.com/21dkkk/Dictatly.git
 cd Dictatly
 ```
 
-### 2. Set Up Python Virtual Environment
+#### 2. Set Up Virtual Environment
 
 ```powershell
 python -m venv venv
@@ -143,12 +183,10 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3. Launching Dictatly
+#### 3. Launching Dictatly
 
-- **Native Launcher (Zero Console Window):**
-  Double-click `Dictatly.exe` (compiled C# wrapper that launches `pythonw.exe main.py`).
-- **Silent VBS Script:**
-  Double-click `Dictatly.vbs`.
+- **Native Launcher (Zero Console Window):** Launch `Dictatly.exe`.
+- **Silent Background Launch:** Double-click `Dictatly.vbs`.
 - **Terminal Launch:**
   ```powershell
   .\run.bat
@@ -174,17 +212,23 @@ Dictatly/
 ├── Dictatly.exe                # Native Windows launcher (no console window)
 ├── main.py                     # Application entry point & single-instance mutex
 ├── Dictatly.vbs                # Silent native Windows launcher script
+├── install.ps1                 # One-command automated PowerShell installer
+├── Dictatly.spec               # PyInstaller standalone distribution spec
 ├── requirements.txt            # Python dependencies (PySide6, faster-whisper, sounddevice)
 ├── run.bat                     # Terminal launcher
 ├── settings.bat                # Direct settings launcher
 ├── history.bat                 # Direct history launcher
+├── installer/
+│   └── Dictatly.iss            # Inno Setup Windows installer configuration
 ├── resources/                  # Icons and application assets
 │   ├── app_icon.ico            # Multi-resolution icon (256x256)
 │   ├── app_icon.png            # 512x512 icon
 │   ├── app_icon_64.png         # 64x64 icon
 │   └── icons/                  # High-DPI SVG vector icons for UI controls
 ├── scripts/
-│   └── build_launcher.py       # C# launcher compiler (Dictatly.exe)
+│   ├── build_dist.py           # Standalone distribution & installer builder
+│   ├── build_launcher.py       # C# launcher compiler (Dictatly.exe)
+│   └── install.ps1             # PowerShell installer script wrapper
 ├── src/
 │   ├── app.py                  # Main coordinator and Qt lifecycle manager
 │   ├── config.py               # JSON settings manager (%APPDATA%/Dictatly)

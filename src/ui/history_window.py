@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from ..localization import t
 from ..core.database import HistoryDatabase, PAGE_SIZE
-from ..config import AppConfig
+from ..config import AppConfig, get_resource_dir
 from .icons import get_svg_pixmap, get_svg_icon
 
 
@@ -1091,7 +1091,7 @@ class QuickHistoryWindow(QWidget):
         self.setWindowTitle(t("history_title", lang))
 
         # App Window Icon
-        res_dir = Path(__file__).resolve().parent.parent.parent / "resources"
+        res_dir = get_resource_dir()
         icon_path = res_dir / "app_icon_64.png"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
