@@ -7,8 +7,9 @@ from typing import Dict, Tuple, Optional
 from PySide6.QtCore import QByteArray, QRectF, Qt
 from PySide6.QtGui import QPixmap, QPainter, QColor, QIcon
 from PySide6.QtSvg import QSvgRenderer
+from src.config import get_resource_dir
 
-ICONS_DIR = Path(__file__).resolve().parent.parent.parent / "resources" / "icons"
+ICONS_DIR = get_resource_dir() / "icons"
 
 class SvgIconManager:
     _renderers: Dict[str, QSvgRenderer] = {}

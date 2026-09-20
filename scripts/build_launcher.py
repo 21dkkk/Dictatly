@@ -20,8 +20,8 @@ using System.Reflection;
 [assembly: AssemblyDescription("Dictatly - Local Speech Dictation")]
 [assembly: AssemblyCompany("Dictatly")]
 [assembly: AssemblyCopyright("Copyright 2026 Dictatly")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
-[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
 
 namespace DictatlyLauncher
 {

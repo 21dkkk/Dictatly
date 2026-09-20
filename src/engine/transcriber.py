@@ -29,8 +29,18 @@ def setup_cuda_dll_path():
 
 setup_cuda_dll_path()
 
-def get_model_cache_dir() -> str:
-    """Return model cache dir, preserving existing downloads from superdictate if present."""
+def get_model_cache_dir(model_size: str = "") -> str:
+    """Return model cache dir, checking bundled models alongside application first."""
+    base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent.parent
+    bundled = base_dir / "models"
+    if bundled.exists():
+        if model_size:
+            safe = model_size.replace("/", "--").replace(" ", "-")
+            if any(bundled.glob(f"*{safe}*")):
+                return str(bundled)
+        elif any(bundled.iterdir()):
+            return str(bundled)
+
     primary = Path.home() / ".cache" / "dictatly" / "models"
     fallback = Path.home() / ".cache" / "superdictate" / "models"
     if not primary.exists() and fallback.exists():
@@ -84,7 +94,7 @@ class SpeechTranscriber:
                     device=self.active_device,
                     compute_type=self.active_compute_type,
                     cpu_threads=threads,
-                    download_root=get_model_cache_dir()
+                    download_root=get_model_cache_dir(self.model_size)
                 )
                 print(f"[ASR] Model loaded in {time.time() - start_t:.2f}s.")
             except Exception as e:
@@ -99,7 +109,7 @@ class SpeechTranscriber:
                         device="cpu",
                         compute_type="int8",
                         cpu_threads=threads,
-                        download_root=get_model_cache_dir()
+                        download_root=get_model_cache_dir(self.model_size)
                     )
                 except Exception as ex:
                     print(f"[ASR] Fatal error loading model: {ex}")

@@ -21,6 +21,19 @@ def get_app_data_dir() -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
 
+def get_resource_dir() -> Path:
+    """Return resources directory, supporting frozen exe and source runs."""
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).parent
+        if (exe_dir / "resources").exists():
+            return exe_dir / "resources"
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass and (Path(meipass) / "resources").exists():
+            return Path(meipass) / "resources"
+        if (exe_dir / "_internal" / "resources").exists():
+            return exe_dir / "_internal" / "resources"
+    return Path(__file__).resolve().parent.parent / "resources"
+
 def get_default_export_dir() -> Path:
     """Return default export directory (Desktop)."""
     userprofile = os.environ.get("USERPROFILE")

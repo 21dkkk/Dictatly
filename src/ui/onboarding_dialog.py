@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..localization import t
-from ..config import AppConfig
+from ..config import AppConfig, get_resource_dir
 from ..core.autostart import set_autostart, create_shortcuts
 
 class CheckIndicator(QWidget):
@@ -179,7 +179,7 @@ class OnboardingDialog(QDialog):
         self.setFixedSize(510, 560)
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
 
-        res_dir = Path(__file__).resolve().parent.parent.parent / "resources"
+        res_dir = get_resource_dir()
         ico_file = res_dir / "app_icon.ico"
         if not ico_file.exists():
             ico_file = res_dir / "app_icon_64.png"
@@ -202,7 +202,7 @@ class OnboardingDialog(QDialog):
         header_layout.setSpacing(16)
 
         icon_lbl = QLabel()
-        res_dir = Path(__file__).resolve().parent.parent.parent / "resources"
+        res_dir = get_resource_dir()
         ico_file = res_dir / "app_icon_64.png"
         if ico_file.exists():
             pix = QPixmap(str(ico_file)).scaled(54, 54, Qt.KeepAspectRatio, Qt.SmoothTransformation)

@@ -61,14 +61,14 @@ All processing runs locally on your device. Audio and transcribed text are store
                         ▼                               ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                         INFERENCE & TRANSCRIPTION                        │
-│          faster-whisper Engine (NVIDIA CUDA FP16 / Multi-Core CPU)        │
+│          faster-whisper Engine (NVIDIA CUDA FP16 / Multi-Core CPU)       │
 └───────────────────────────────────────┬──────────────────────────────────┘
                                         ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                         TEXT POST-PROCESSING PIPELINE                    │
 │   • Smart Punctuation & Capitalization (Preserves Decimals and Clock)    │
-│   • Custom Vocabulary Dictionary (e.g., 'пайтон' -> 'Python')             │
-│   • Optional DPAPI-Secured Cloud AI Post-Processor                        │
+│   • Custom Vocabulary Dictionary (e.g., 'пайтон' -> 'Python')            │
+│   • Optional DPAPI-Secured Cloud AI Post-Processor                       │
 └───────────────────────┬───────────────────────────────┬──────────────────┘
                         │                               │
                         ▼                               ▼
@@ -125,16 +125,43 @@ All processing runs locally on your device. Audio and transcribed text are store
 
 ---
 
-## Quick Start Guide
+## Installation & Quick Start
 
-### 1. Clone the Repository
+Choose the installation method that fits your workflow:
+
+### Method 1: One-Line PowerShell Command (Recommended)
+
+Automated quick installation. No manual cloning, build steps, or dependency setup required.
+
+1. Press <kbd>Win</kbd> + <kbd>R</kbd>, type `powershell`, and hit <kbd>Enter</kbd>.
+2. Run the following command:
+
+```powershell
+irm https://raw.githubusercontent.com/21dkkk/Dictatly/main/install.ps1 | iex
+```
+
+The automated installer script will:
+- Check for Python 3.10+ (and auto-install it via `winget` if missing);
+- Deploy the latest application files to `%LOCALAPPDATA%\Dictatly`;
+- Create an isolated virtual environment (`venv`) and install all required dependencies;
+- Pre-cache the Faster-Whisper `large-v3-turbo` model for zero-delay speech recognition;
+- Compile the native Windows launcher (`Dictatly.exe`);
+- Create Desktop and Start Menu shortcuts.
+
+---
+
+### Method 2: Developer Setup (Git + Python)
+
+For developers looking to contribute, customize, or inspect the codebase:
+
+#### 1. Clone the Repository
 
 ```powershell
 git clone https://github.com/21dkkk/Dictatly.git
 cd Dictatly
 ```
 
-### 2. Set Up Python Virtual Environment
+#### 2. Set Up Virtual Environment
 
 ```powershell
 python -m venv venv
@@ -143,12 +170,10 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3. Launching Dictatly
+#### 3. Launching Dictatly
 
-- **Native Launcher (Zero Console Window):**
-  Double-click `Dictatly.exe` (compiled C# wrapper that launches `pythonw.exe main.py`).
-- **Silent VBS Script:**
-  Double-click `Dictatly.vbs`.
+- **Native Launcher (Zero Console Window):** Launch `Dictatly.exe`.
+- **Silent Background Launch:** Double-click `Dictatly.vbs`.
 - **Terminal Launch:**
   ```powershell
   .\run.bat
@@ -174,6 +199,7 @@ Dictatly/
 ├── Dictatly.exe                # Native Windows launcher (no console window)
 ├── main.py                     # Application entry point & single-instance mutex
 ├── Dictatly.vbs                # Silent native Windows launcher script
+├── install.ps1                 # One-command automated PowerShell installer
 ├── requirements.txt            # Python dependencies (PySide6, faster-whisper, sounddevice)
 ├── run.bat                     # Terminal launcher
 ├── settings.bat                # Direct settings launcher
@@ -184,7 +210,8 @@ Dictatly/
 │   ├── app_icon_64.png         # 64x64 icon
 │   └── icons/                  # High-DPI SVG vector icons for UI controls
 ├── scripts/
-│   └── build_launcher.py       # C# launcher compiler (Dictatly.exe)
+│   ├── build_launcher.py       # C# launcher compiler (Dictatly.exe)
+│   └── install.ps1             # PowerShell installer script wrapper
 ├── src/
 │   ├── app.py                  # Main coordinator and Qt lifecycle manager
 │   ├── config.py               # JSON settings manager (%APPDATA%/Dictatly)

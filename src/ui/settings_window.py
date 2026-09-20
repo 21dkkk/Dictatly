@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..localization import t
-from ..config import AppConfig
+from ..config import AppConfig, get_resource_dir
 from ..core.hotkey import GlobalHotkeyManager
 from ..core.audio import AudioRecorder
 from ..core.security import encrypt_secret, decrypt_secret
@@ -247,7 +247,7 @@ class SettingsWindow(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, True)
 
         # Set Window Icon
-        res_dir = Path(__file__).resolve().parent.parent.parent / "resources"
+        res_dir = get_resource_dir()
         icon_path = res_dir / "app_icon_64.png"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
@@ -998,7 +998,7 @@ class SettingsWindow(QWidget):
         self.preview_hud_requested.emit(size)
 
     def _apply_global_theme(self, theme: str = "dark"):
-        check_icon_path = str(Path(__file__).resolve().parent.parent.parent / "resources" / "check_white.png").replace("\\", "/")
+        check_icon_path = str(get_resource_dir() / "check_white.png").replace("\\", "/")
         self.setStyleSheet(f"""
             SettingsWindow, QScrollArea, #BodyWidget {{
                 background-color: #1E1E20;

@@ -12,13 +12,25 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 
 # Add project root to sys.path
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 # Ensure NVIDIA DLL directories are discovered
 def setup_cuda_paths():
     if sys.platform == "win32":
+        if getattr(sys, "frozen", False):
+            exe_dir = Path(sys.executable).parent
+            for d in [exe_dir, exe_dir / "_internal"]:
+                if d.exists():
+                    try:
+                        os.add_dll_directory(str(d))
+                    except Exception:
+                        pass
+                    if str(d) not in os.environ.get("PATH", ""):
+                        os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
+            return
+
         site_packages = Path(sys.prefix) / "Lib" / "site-packages"
         for sub in ["nvidia/cublas/bin", "nvidia/cudnn/bin", "nvidia/cuda_nvrtc/bin", "ctranslate2"]:
             p = site_packages / sub

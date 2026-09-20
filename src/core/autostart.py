@@ -13,6 +13,8 @@ REG_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 APP_REG_NAME = "Dictatly"
 
 def get_project_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
     return Path(__file__).resolve().parent.parent.parent
 
 def get_pythonw_executable() -> Path:

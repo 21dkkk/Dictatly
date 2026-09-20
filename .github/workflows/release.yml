@@ -1,0 +1,77 @@
+name: Release Publication
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Prepare Release Notes
+        run: |
+          cat << 'EOF' > release_notes.md
+          # Dictatly 1.1.1
+
+          ## ⚡ Быстрая установка (PowerShell) / Quick Install
+
+          Запустите PowerShell (<kbd>Win</kbd> + <kbd>R</kbd> → `powershell`) и выполните команду:
+
+          ```powershell
+          irm https://raw.githubusercontent.com/21dkkk/Dictatly/main/install.ps1 | iex
+          ```
+
+          ### Что делает скрипт установки:
+          - Автоматически проверяет наличие Python 3.10+ (при необходимости устанавливает через Windows Package Manager);
+          - Разворачивает файлы приложения в `%LOCALAPPDATA%\Dictatly`;
+          - Создает изолированное виртуальное окружение `venv` и устанавливает все зависимости (PySide6, Faster-Whisper, PyWin32);
+          - Автоматически кэширует модель Faster-Whisper `large-v3-turbo` для мгновенного старта;
+          - Компилирует нативный Windows-лаунчер `Dictatly.exe` (запуск без мелькания консоли);
+          - Создает ярлыки на Рабочем столе и в меню Пуск.
+
+          ---
+
+          ## 🛠️ Установка для разработчиков / Developer Setup
+
+          ```powershell
+          git clone https://github.com/21dkkk/Dictatly.git
+          cd Dictatly
+          python -m venv venv
+          .\venv\Scripts\activate
+          pip install -r requirements.txt
+          python main.py
+          ```
+
+          ---
+
+          ## 📋 Что нового в версии 1.1.1 / What's New:
+          - **Установка в одну строку:** Полностью автоматизированный PowerShell-скрипт развертывания (`install.ps1`).
+          - **Нативный лаунчер `Dictatly.exe`:** Бесшумный запуск в фоновом режиме без появления черного окна терминала.
+          - **Оптимизация запуска:** Автоматическое подключение библиотек ускорения CUDA и CTranslate2 при старте.
+          - **Совместимость с Windows 11 24H2:** Надежное управление фоновыми процессами через CIM-командлеты.
+          EOF
+
+      - name: Create or Update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          echo "Updating release for tag: $TAG"
+
+          # Delete pre-existing release to ensure outdated 1.8GB descriptions and stale assets are replaced completely
+          gh release delete "$TAG" --yes || true
+
+          # Create fresh release with clean, accurate description
+          gh release create "$TAG" install.ps1 \
+            --title "Dictatly $TAG" \
+            --notes-file release_notes.md
