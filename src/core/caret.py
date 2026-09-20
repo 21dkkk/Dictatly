@@ -55,7 +55,22 @@ def get_caret_screen_position() -> Tuple[int, int]:
     except Exception:
         pass
 
-    # Fallback 1: Current mouse cursor position
+    # Fallback 1: Active foreground window center (preserves multi-monitor locality)
+    try:
+        hwnd_fg = user32.GetForegroundWindow()
+        if hwnd_fg:
+            rect = RECT()
+            if user32.GetWindowRect(hwnd_fg, ctypes.byref(rect)):
+                w = rect.right - rect.left
+                h = rect.bottom - rect.top
+                if w > 50 and h > 50:
+                    cx = rect.left + (w // 2)
+                    cy = rect.top + (h // 3)  # Upper third of active typing window
+                    return cx, cy
+    except Exception:
+        pass
+
+    # Fallback 2: Current mouse cursor position
     try:
         pt = wintypes.POINT()
         if user32.GetCursorPos(ctypes.byref(pt)):
@@ -63,7 +78,7 @@ def get_caret_screen_position() -> Tuple[int, int]:
     except Exception:
         pass
 
-    # Fallback 2: Default center screen
+    # Fallback 3: Default center screen
     cx = user32.GetSystemMetrics(0) // 2  # SM_CXSCREEN
     cy = user32.GetSystemMetrics(1) // 2  # SM_CYSCREEN
     return cx, cy

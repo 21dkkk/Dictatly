@@ -64,6 +64,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     
     # Audio & Model
     "microphone_device": None,             # None = default input device
+    "microphone_device_name": None,        # Persistent name fallback
     "dictation_language": "auto",          # "auto", "ru", "en"
     "whisper_model": "large-v3-turbo",     # "large-v3-turbo", "small", "base"
     "compute_device": "auto",              # "auto", "cuda", "cpu"

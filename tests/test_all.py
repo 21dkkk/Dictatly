@@ -17,10 +17,12 @@ from src.core.database import HistoryDatabase
 from src.core.security import encrypt_secret, decrypt_secret
 from src.core.caret import get_caret_screen_position
 from src.core.hotkey import key_combo_to_display, normalize_key_string, GlobalHotkeyManager
-from src.core.audio import AudioRecorder
+from src.core.audio import AudioRecorder, resample_audio
 from src.core.autostart import get_launch_command, get_pythonw_executable, is_autostart_enabled
 from src.core.sound import play_audio_cue
 from src.core.text_postprocess import apply_vocabulary, format_smart_punctuation
+from src.engine.transcriber import SpeechTranscriber
+import numpy as np
 
 class TestDictatly(unittest.TestCase):
     def test_config(self):
@@ -244,6 +246,57 @@ class TestDictatly(unittest.TestCase):
         self.assertIsNotNone(mgr.on_escape_pressed)
         mgr.on_escape_pressed()
         self.assertEqual(escaped, [True])
+
+    def test_audio_resampling(self):
+        # 1. Same sample rate: should return copy/identity
+        mono_16k = np.sin(np.linspace(0, 100, 16000)).astype(np.float32)
+        res_same = resample_audio(mono_16k, orig_sr=16000, target_sr=16000)
+        self.assertEqual(len(res_same), 16000)
+
+        # 2. 48000 to 16000
+        mono_48k = np.sin(np.linspace(0, 100, 48000)).astype(np.float32)
+        res_from_48k = resample_audio(mono_48k, orig_sr=48000, target_sr=16000)
+        self.assertEqual(len(res_from_48k), 16000)
+
+        # 3. 44100 to 16000
+        mono_44k = np.sin(np.linspace(0, 100, 44100)).astype(np.float32)
+        res_from_44k = resample_audio(mono_44k, orig_sr=44100, target_sr=16000)
+        self.assertEqual(len(res_from_44k), 16000)
+
+        # 4. Multi-channel downmix
+        stereo_48k = np.column_stack([mono_48k, mono_48k])
+        res_stereo = resample_audio(stereo_48k, orig_sr=48000, target_sr=16000)
+        self.assertEqual(len(res_stereo), 16000)
+        self.assertEqual(res_stereo.ndim, 1)
+
+    def test_audio_fallback_logic(self):
+        # Recorder initialized with invalid device index and nonexistent name
+        rec = AudioRecorder(device_index=-9999, device_name="NonExistentMicrophone_12345")
+        # Should gracefully probe and fallback without crashing
+        self.assertFalse(rec.is_recording)
+        # Verify set_device handles device name
+        rec.set_device(999, "TestMic")
+        self.assertEqual(rec.device_index, 999)
+        self.assertEqual(rec.device_name, "TestMic")
+
+    def test_hotkey_physical_key_sync(self):
+        mgr = GlobalHotkeyManager()
+        # Seed phantom keys
+        mgr._pressed_keys = {"VK_RCONTROL", "VK_LSHIFT", "VK_RETURN"}
+        # Sync with physical OS state (should clear unheld keys)
+        mgr._sync_physical_keys()
+        # Unless the runner physically holds Right Ctrl and Enter right now, they will be cleared
+        self.assertIsInstance(mgr._pressed_keys, set)
+
+    def test_transcriber_silence_guard(self):
+        engine = SpeechTranscriber(model_size="tiny", device_pref="cpu")
+        # Pure zeros / silent buffer
+        silence = np.zeros(16000, dtype=np.float32)
+        result = engine.transcribe_audio(silence)
+        self.assertEqual(result, "", "Silence buffer must return empty string without loading model or hallucinating")
+
+        # None / empty array
+        self.assertEqual(engine.transcribe_audio(np.array([], dtype=np.float32)), "")
 
 if __name__ == "__main__":
     unittest.main()

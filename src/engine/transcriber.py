@@ -121,6 +121,14 @@ class SpeechTranscriber:
         Transcribes 16kHz float32 audio numpy array.
         language: None/'auto', or 'ru', 'en'.
         """
+        if audio is None or len(audio) == 0:
+            return ""
+
+        # Check RMS energy to avoid hallucinating on pure background silence
+        rms_energy = float(np.sqrt(np.mean(np.square(audio))))
+        if rms_energy < 0.002:
+            return ""
+
         if self._model is None:
             self.load_model()
             
@@ -145,8 +153,8 @@ class SpeechTranscriber:
 
             result = " ".join(collected_text).strip()
 
-            # Fallback if VAD was too aggressive on quiet voice
-            if not result:
+            # Fallback only if there is audible voice energy but VAD was overly strict
+            if not result and rms_energy >= 0.004:
                 segments, info = self._model.transcribe(
                     audio,
                     language=lang,
@@ -156,6 +164,20 @@ class SpeechTranscriber:
                 )
                 collected_text = [seg.text.strip() for seg in segments]
                 result = " ".join(collected_text).strip()
+
+            # Clean out pure punctuation / whisper hallucination artifacts
+            if result:
+                alphanumeric_chars = [c for c in result if c.isalnum()]
+                if not alphanumeric_chars:
+                    return ""
+                lower_trimmed = result.strip().lower()
+                known_hallucinations = {
+                    "продолжение следует", "редактор субтитров", "субтитры сделал",
+                    "субтитры", "спасибо за просмотр", "thank you for watching",
+                    "subtitles by", "translated by", "subscribe", "подпишитесь на канал"
+                }
+                if lower_trimmed in known_hallucinations:
+                    return ""
 
             return result
         except Exception as e:

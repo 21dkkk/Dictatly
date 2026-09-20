@@ -47,6 +47,54 @@ setup_cuda_paths()
 from PySide6.QtGui import QIcon
 from src.app import DictatlyApp
 
+def setup_logging():
+    """Redirect stdout/stderr to rotating %APPDATA%/Dictatly/dictatly.log for diagnostics."""
+    try:
+        from src.config import get_app_data_dir
+        log_dir = get_app_data_dir()
+        log_file = log_dir / "dictatly.log"
+        if log_file.exists() and log_file.stat().st_size > 1024 * 1024:
+            old_log = log_dir / "dictatly.old.log"
+            if old_log.exists():
+                old_log.unlink()
+            log_file.rename(old_log)
+
+        class LogWriter:
+            def __init__(self, original, filepath):
+                self.original = original
+                self.file = open(filepath, "a", encoding="utf-8", buffering=1)
+
+            def write(self, msg):
+                if not msg:
+                    return
+                try:
+                    if self.original:
+                        self.original.write(msg)
+                except Exception:
+                    pass
+                try:
+                    self.file.write(msg)
+                except Exception:
+                    pass
+
+            def flush(self):
+                try:
+                    if self.original:
+                        self.original.flush()
+                except Exception:
+                    pass
+                try:
+                    self.file.flush()
+                except Exception:
+                    pass
+
+        sys.stdout = LogWriter(sys.stdout, log_file)
+        sys.stderr = LogWriter(sys.stderr, log_file)
+    except Exception:
+        pass
+
+setup_logging()
+
 _GLOBAL_MUTEX = None
 
 def release_single_instance_mutex():
@@ -60,10 +108,10 @@ def release_single_instance_mutex():
         _GLOBAL_MUTEX = None
 
 def acquire_single_instance_mutex() -> bool:
-    """Acquire single instance mutex, retrying during restarts if needed."""
+    """Acquire session single instance mutex, retrying during restarts if needed."""
     global _GLOBAL_MUTEX
     import time
-    mutex_name = "Global\\Dictatly_SingleInstance_Mutex"
+    mutex_name = "Local\\Dictatly_SingleInstance_Mutex"
     kernel32 = ctypes.windll.kernel32
 
     # If restart flag present, give prior instance a brief grace period to release mutex
@@ -113,6 +161,17 @@ def main():
 
     if not acquire_single_instance_mutex():
         print("[Dictatly] Another instance is already running.")
+        # If user launched application directly without arguments, activate Settings window
+        import subprocess
+        try:
+            from src.core.autostart import get_pythonw_executable, get_project_root
+            root = get_project_root()
+            py_exe = str(get_pythonw_executable())
+            main_py = str(root / "main.py")
+            creation_flags = 0x08000000 if sys.platform == "win32" else 0
+            subprocess.Popen([py_exe, main_py, "--settings"], cwd=str(root), creationflags=creation_flags)
+        except Exception:
+            pass
         sys.exit(0)
 
     # Enable High-DPI scaling

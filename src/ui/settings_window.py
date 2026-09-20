@@ -475,27 +475,26 @@ class SettingsWindow(QWidget):
         self.combo_mic.setMaximumWidth(280)
         self.combo_mic.addItem("", None)
         devices = AudioRecorder.get_input_devices()
-        cur_dev = self.config["microphone_device"]
-        
-        # Match current device by index or fallback to name matching (for device migrations)
-        matched = False
-        saved_name = None
-        if cur_dev is not None:
+        cur_dev = self.config.get("microphone_device")
+        saved_name = (self.config.get("microphone_device_name") or "").strip().lower()
+        if not saved_name and cur_dev is not None:
             try:
                 import sounddevice as sd
                 saved_name = sd.query_devices(cur_dev).get("name", "").strip().lower()
             except Exception:
-                saved_name = None
+                saved_name = ""
 
+        # Match current device by index or fallback to name matching (for device migrations)
+        matched = False
         for d in devices:
             clean_name = d["name"].replace("\r", " ").replace("\n", " ").strip()
             display_name = clean_name if len(clean_name) <= 40 else clean_name[:37] + "..."
             self.combo_mic.addItem(display_name, d["index"])
             if not matched:
-                if cur_dev == d["index"]:
+                if cur_dev is not None and cur_dev == d["index"]:
                     self.combo_mic.setCurrentIndex(self.combo_mic.count() - 1)
                     matched = True
-                elif saved_name and saved_name == d["name"].strip().lower():
+                elif saved_name and saved_name in d["name"].strip().lower():
                     self.combo_mic.setCurrentIndex(self.combo_mic.count() - 1)
                     matched = True
         mic_row.addWidget(self.lbl_mic)
@@ -1117,7 +1116,17 @@ class SettingsWindow(QWidget):
         self.config["autostart_with_windows"] = self.chk_autostart.isChecked()
         set_autostart(self.chk_autostart.isChecked())
         self.config["paste_suffix"] = self.combo_suffix.currentData()
-        self.config["microphone_device"] = self.combo_mic.currentData()
+        selected_mic = self.combo_mic.currentData()
+        self.config["microphone_device"] = selected_mic
+        if selected_mic is not None:
+            try:
+                import sounddevice as sd
+                dev_info = sd.query_devices(selected_mic)
+                self.config["microphone_device_name"] = dev_info.get("name", "").strip()
+            except Exception:
+                self.config["microphone_device_name"] = ""
+        else:
+            self.config["microphone_device_name"] = None
         self.config["export_folder"] = self.txt_export_folder.text()
 
         self.config["whisper_model"] = self.combo_model.currentData()
@@ -1150,23 +1159,39 @@ class SettingsWindow(QWidget):
 
             def audio_cb(indata, frames, time_info, status):
                 try:
-                    rms = float(np.sqrt(np.mean(np.square(indata))))
+                    if indata.ndim > 1 and indata.shape[1] > 1:
+                        mono = np.mean(indata, axis=1)
+                    else:
+                        mono = indata
+                    rms = float(np.sqrt(np.mean(np.square(mono))))
                     vol = min(1.0, rms * 14.0)
                     self.mic_level_signal.emit(vol)
                 except Exception:
                     pass
 
             extra_settings = AudioRecorder.get_extra_settings(dev_idx)
-            self._mic_test_stream = sd.InputStream(
-                device=dev_idx,
-                channels=1,
-                samplerate=16000,
-                blocksize=1024,
-                dtype="float32",
-                callback=audio_cb,
-                extra_settings=extra_settings
-            )
-            self._mic_test_stream.start()
+            stream = None
+            # Probe supported rate and channels
+            for ch in (1, 2):
+                for rate in (16000, 48000, 44100):
+                    try:
+                        stream = sd.InputStream(
+                            device=dev_idx,
+                            channels=ch,
+                            samplerate=rate,
+                            blocksize=1024,
+                            dtype="float32",
+                            callback=audio_cb,
+                            extra_settings=extra_settings
+                        )
+                        stream.start()
+                        break
+                    except Exception:
+                        stream = None
+                if stream is not None:
+                    break
+
+            self._mic_test_stream = stream
         except Exception as e:
             print(f"[Settings] Could not start mic test stream: {e}")
             self._mic_test_stream = None

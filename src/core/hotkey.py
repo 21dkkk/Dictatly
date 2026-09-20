@@ -124,6 +124,26 @@ SINGLE_MODIFIER_KEYS = {
     "VK_CAPITAL"
 }
 
+REVERSE_VK_MAP: Dict[str, int] = {
+    "VK_LCONTROL": 0xA2,
+    "VK_RCONTROL": 0xA3,
+    "VK_LSHIFT": 0xA0,
+    "VK_RSHIFT": 0xA1,
+    "VK_LMENU": 0xA4,
+    "VK_RMENU": 0xA5,
+    "VK_LWIN": 0x5B,
+    "VK_RWIN": 0x5C,
+    "VK_CAPITAL": 0x14,
+    "VK_SPACE": 0x20,
+    "VK_RETURN": 0x0D,
+    "VK_ESCAPE": 0x1B,
+    "VK_TAB": 0x09,
+    "VK_INSERT": 0x2D,
+    "VK_DELETE": 0x2E,
+}
+for f_num in range(1, 25):
+    REVERSE_VK_MAP[f"VK_F{f_num}"] = 0x70 + f_num - 1
+
 class GlobalHotkeyManager:
     def __init__(self):
         self._hook = None
@@ -151,6 +171,10 @@ class GlobalHotkeyManager:
         # Capture mode (when recording new hotkey in Settings)
         self.is_recording_new_hotkey: bool = False
         self.on_hotkey_recorded: Optional[Callable[[str], None]] = None
+
+        # Watchdog to ensure hook persistence across sleep/wake and timeout drops
+        self._running = False
+        self._watchdog_thread: Optional[threading.Thread] = None
 
     def register_hotkey(self, combo: str, callback: Callable[[], None]):
         """Register toggle callback for a given combo (e.g. 'VK_RCONTROL')."""
@@ -193,6 +217,22 @@ class GlobalHotkeyManager:
             self._active_single_key = None
             self._active_ptt_combo = None
             print(f"[Hotkey] Paused state set to: {paused}")
+
+    def _sync_physical_keys(self):
+        """Purges any keys that are no longer physically down (recovering from missed KeyUp events)."""
+        stale = []
+        for k in self._pressed_keys:
+            vk = REVERSE_VK_MAP.get(k)
+            if vk is not None:
+                state = user32.GetAsyncKeyState(vk)
+                if not (state & 0x8000):
+                    stale.append(k)
+            elif len(k) == 1 and ord('A') <= ord(k) <= ord('Z'):
+                state = user32.GetAsyncKeyState(ord(k))
+                if not (state & 0x8000):
+                    stale.append(k)
+        for k in stale:
+            self._pressed_keys.discard(k)
 
     def _get_clean_combo(self, keys: Set[str]) -> str:
         c = set(keys)
@@ -251,6 +291,7 @@ class GlobalHotkeyManager:
                         return 1  # Suppress Escape key so it solely cancels dictation
 
                     with self._lock:
+                        self._sync_physical_keys()
                         already_pressed = key_name in self._pressed_keys
                         self._pressed_keys.add(key_name)
                         clean_combo = self._get_clean_combo(self._pressed_keys)
@@ -320,30 +361,39 @@ class GlobalHotkeyManager:
 
         return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
 
-    def start(self):
-        """Start the Windows low-level hook in a dedicated message pump thread."""
-        if self._thread and self._thread.is_alive():
-            return
+    def _install_hook_internal(self) -> bool:
+        """Internal low-level hook installation for WH_KEYBOARD_LL."""
+        self._proc = HOOKPROC(self._hook_callback)
+        self._hook = user32.SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            self._proc,
+            None,
+            0
+        )
+        return bool(self._hook)
 
+    def _watchdog_loop(self):
+        """Watchdog checking if hook message pump is active and responsive."""
+        while self._running:
+            time.sleep(3.0)
+            if not self._running:
+                break
+            # If pump thread crashed, respawn
+            if self._thread is None or not self._thread.is_alive():
+                print("[Hotkey Watchdog] Keyboard pump thread died. Re-starting...")
+                self._start_pump_thread()
+
+    def _start_pump_thread(self):
+        """Starts the dedicated Win32 message pump thread."""
         def run():
             self._thread_id = kernel32.GetCurrentThreadId()
-            self._proc = HOOKPROC(self._hook_callback)
-            
-            # For WH_KEYBOARD_LL (global hook), hMod must be None/NULL on Windows
-            self._hook = user32.SetWindowsHookExW(
-                WH_KEYBOARD_LL,
-                self._proc,
-                None,
-                0
-            )
-            if not self._hook:
+            if not self._install_hook_internal():
                 err = ctypes.GetLastError()
                 print(f"[Hotkey] Failed to install keyboard hook. Error code: {err}")
                 return
 
-            print(f"[Hotkey] Low-level keyboard hook installed successfully (handle: {self._hook}).")
+            print(f"[Hotkey] Low-level keyboard hook active (handle: {self._hook}).")
 
-            # Standard Win32 Message Loop
             msg = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
                 user32.TranslateMessage(ctypes.byref(msg))
@@ -352,8 +402,21 @@ class GlobalHotkeyManager:
         self._thread = threading.Thread(target=run, daemon=True)
         self._thread.start()
 
+    def start(self):
+        """Start the Windows low-level hook and watchdog thread."""
+        if self._thread and self._thread.is_alive():
+            return
+
+        self._running = True
+        self._start_pump_thread()
+
+        if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+            self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+            self._watchdog_thread.start()
+
     def stop(self):
         """Stop the hook and exit message loop cleanly."""
+        self._running = False
         hook = self._hook
         self._hook = None
         if hook:

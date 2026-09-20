@@ -85,19 +85,17 @@ All processing runs locally on your device. Audio and transcribed text are store
 
 ## Features
 
-- **Local GPU & CPU Acceleration:** Powered by [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper). Uses NVIDIA CUDA FP16 for low-latency recognition, with automatic multi-threaded CPU fallback (`int8`).
-- **Caret-Anchored HUD:** Floating dark glass widget centered dynamically above the active text cursor (`GetGUIThreadInfo`). Uses Win32 `WS_EX_NOACTIVATE` so it never steals focus from the target application.
-- **Vector Iconography:** Scalable High-DPI SVG icons for UI controls and indicators, replacing emoji glyphs.
-- **Productivity Analytics:** Visual tracking of daily word volume, speaking pace over time, and input source distribution.
-- **Batch Audio Transcription:** Drag-and-drop workspace and file dialog selector supporting `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, and `.ogg` files with automatic `.txt` export.
-- **Low-Level Keyboard Hook:** Native `WH_KEYBOARD_LL` hook running in a dedicated message loop. Differentiates physical Left vs. Right modifiers (`Right Ctrl`, `Right Alt / AltGr`, `Right Shift`) and supports Toggle and Push-to-Talk modes.
-- **Reliable Text Injection:** Restores target window focus, synchronizes with the Windows clipboard, and simulates `Ctrl+V` key events using hardware scan codes and thread input attachment (`AttachThreadInput`).
-- **Smart Punctuation & Vocabulary:** Automatic sentence capitalization and punctuation spacing while protecting decimal numbers (`3.14`, `1,5`), clock times (`12:30`), and domain names (`google.com`). User-defined word replacement list for technical terminology.
-- **DPAPI Key Storage:** Cloud API keys (Groq, OpenAI, Ollama) are encrypted locally using the Windows Data Protection API (`CryptProtectData`), tied strictly to the current Windows user account.
-- **Audio Feedback & Gaming Pause:** Tactile audio cues on start/stop. System tray option to suspend hotkey interception during games or voice calls.
-- **Bilingual Interface:** English and Russian localization across all windows, menus, charts, and notification dialogs.
-- **Resource Management:** Chart animation and polling timers disconnect when windows are hidden (`hideEvent`), maintaining zero idle CPU usage.
-- **Windows 11 24H2 Compatible:** Process management and single-instance handling use PowerShell CIM cmdlets, avoiding deprecated `wmic.exe`.
+- **Local GPU & CPU Acceleration:** Speech recognition powered by [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper). Uses NVIDIA CUDA FP16 for real-time transcription, with multi-core CPU `int8` fallback.
+- **Caret-Anchored HUD:** Floating dark glass widget positioned dynamically above the active text cursor (`GetGUIThreadInfo`). Configured with Win32 `WS_EX_NOACTIVATE` to prevent focus stealing from the active editor, browser, or terminal.
+- **Resilient Audio Pipeline:** Multi-tier hardware fallback (`device_index` -> `device_name` -> default device) with dynamic native sample rate probing (16 kHz, 44.1 kHz, 48 kHz) and linear interpolation downsampling (`resample_audio`).
+- **Low-Level Hook with Watchdog:** Native `WH_KEYBOARD_LL` hook running in a dedicated Windows message pump. Monitored by a background watchdog thread to auto-reinstate the hook if dropped under `LowLevelHooksTimeout` (200ms), with physical key synchronization (`GetAsyncKeyState`) to purge stuck modifiers.
+- **Reliable Text Injection:** Restores target window focus, monitors Windows clipboard locks (`GetOpenClipboardWindow`), and simulates `Ctrl+V` key events using hardware scan codes, thread input attachment (`AttachThreadInput`), and extended modifier key flags (`KEYEVENTF_EXTENDEDKEY` on `VK_RCONTROL`).
+- **Silence Energy Thresholding:** Pre-ASR RMS acoustic energy gate (`rms >= 0.002`) that eliminates silence hallucinations and prevents unnecessary inference model invocations.
+- **Batch Audio File Transcription:** Dedicated drop zone supporting `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, and `.ogg` files with background processing and automatic `.txt` export.
+- **Productivity Analytics:** Searchable SQLite transcript archive with visual tracking of daily word volume, speaking velocity (WPM), and audio source distribution.
+- **Smart Punctuation & Custom Lexicon:** Automatic capitalization and punctuation formatting with protection for decimal numbers (`3.14`), clock times (`12:30`), and domain names (`google.com`). User-configurable vocabulary replacement dictionary.
+- **DPAPI Key Storage:** Optional cloud API credentials are encrypted locally via the Windows Data Protection API (`CryptProtectData`), strictly bound to the active user account.
+- **Vector Iconography & Bilingual UI:** Scalable SVG vector icons and full English / Russian interface localization.
 
 ---
 
@@ -257,8 +255,8 @@ Run the automated test suite to verify core modules, concurrency, and UI compone
 
 1. **Local Audio Processing:** Audio captured by Dictatly is processed locally in memory and VRAM. Audio buffers are cleared immediately after transcription.
 2. **DPAPI Key Storage:** API keys used for optional cloud cleanup are encrypted via Windows DPAPI (`CryptProtectData`).
-3. **Single Instance Guarantee:** Enforced via a named Win32 global mutex (`Global\Dictatly_SingleInstance_Mutex`).
-4. **PowerShell CIM Process Management:** Process restarts and terminations use native CIM cmdlets, compatible with Windows 11 24H2 where `wmic.exe` is deprecated.
+3. **Single Instance Guarantee:** Enforced via a session-local Win32 mutex (`Local\Dictatly_SingleInstance_Mutex`) with active window handoff.
+4. **PowerShell CIM Process Management:** Process restarts and terminations use native CIM cmdlets, avoiding deprecated `wmic.exe`.
 
 ---
 

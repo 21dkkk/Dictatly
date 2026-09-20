@@ -179,12 +179,17 @@ def set_clipboard_text(text: str) -> bool:
     finally:
         user32.CloseClipboard()
 
+KEYEVENTF_EXTENDEDKEY = 0x0001
+
 def send_paste_combination():
     """Simulates Ctrl+V reliably with hardware scan codes and proper dwell time."""
     # Unconditionally release any modifier keys (Ctrl, Alt, Shift, Win)
     for vk in (0xA3, 0xA2, 0x11, 0xA5, 0xA4, 0x12, 0xA1, 0xA0, 0x10, 0x5B, 0x5C):
         scan = user32.MapVirtualKeyW(vk, 0)
-        user32.keybd_event(vk, scan, KEYEVENTF_KEYUP, 0)
+        flags = KEYEVENTF_KEYUP
+        if vk in (0xA3, 0xA5, 0x5C):
+            flags |= KEYEVENTF_EXTENDEDKEY
+        user32.keybd_event(vk, scan, flags, 0)
     time.sleep(0.02)
 
     ctrl_scan = user32.MapVirtualKeyW(VK_CONTROL, 0)

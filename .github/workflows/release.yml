@@ -21,27 +21,48 @@ jobs:
       - name: Prepare Release Notes
         run: |
           cat << 'EOF' > release_notes.md
-          # Dictatly 1.1.1
+          # Dictatly 1.1.2
 
-          ## ⚡ Быстрая установка (PowerShell) / Quick Install
+          Dictatly 1.1.2 is a core resilience and stability release focused on low-latency audio capture, Win32 input hook reliability, hardened text injection, and ASR hallucination elimination.
 
-          Запустите PowerShell (<kbd>Win</kbd> + <kbd>R</kbd> → `powershell`) и выполните команду:
+          ### Core Enhancements & Fixes
+
+          - **Resilient Audio Input Pipeline:**
+            - Cascading multi-tier device fallback (`device_index` -> persistent `device_name` -> system default -> any active input).
+            - Dynamic sample rate negotiation probing 16 kHz, 44.1 kHz, and 48 kHz with high-precision linear interpolation resampling (`resample_audio`).
+            - Stereo-to-mono downmixing in audio callback.
+            - Automatic error notification in system tray on hardware disconnection or driver failure.
+
+          - **Low-Level Keyboard Hook Watchdog:**
+            - Integrated 3-second watchdog thread detecting silently detached `WH_KEYBOARD_LL` hooks caused by Windows `LowLevelHooksTimeout` (200ms) under system load.
+            - Physical key polling via `GetAsyncKeyState` on every event, purging stuck modifiers (`VK_RCONTROL`, `VK_LSHIFT`, `VK_RETURN`) caused by missed `WM_KEYUP` during Alt-Tab, UAC, or lock screens.
+
+          - **Text Injector Hardening:**
+            - Added `KEYEVENTF_EXTENDEDKEY` (0x0001) flag for extended keys (`VK_RCONTROL`, `VK_RMENU`, `VK_RWIN`), ensuring clean modifier release before simulated `Ctrl+V`.
+            - Active caret fallback now queries target window bounding rect (`GetWindowRect`), preventing HUD coordinate displacement on multi-monitor setups.
+
+          - **ASR Silence & Hallucination Elimination:**
+            - RMS acoustic energy threshold gate (`rms < 0.002`) skips inference and prevents model loading on background noise or accidental key taps.
+            - Post-transcription sanitization filtering pure punctuation artifacts and hallucinated subtitle credits.
+
+          - **Process Lifecycle & Logging:**
+            - Single-instance mutex switched to session-local scope (`Local\Dictatly_SingleInstance_Mutex`).
+            - Activation handoff opens the Settings window when launching a second instance.
+            - Background rotating diagnostic logging to `%APPDATA%/Dictatly/dictatly.log`.
+
+          ---
+
+          ### Quick Install (PowerShell)
+
+          Run in PowerShell (<kbd>Win</kbd> + <kbd>R</kbd> → `powershell`):
 
           ```powershell
           irm https://raw.githubusercontent.com/21dkkk/Dictatly/main/install.ps1 | iex
           ```
 
-          ### Что делает скрипт установки:
-          - Автоматически проверяет наличие Python 3.10+ (при необходимости устанавливает через Windows Package Manager);
-          - Разворачивает файлы приложения в `%LOCALAPPDATA%\Dictatly`;
-          - Создает изолированное виртуальное окружение `venv` и устанавливает все зависимости (PySide6, Faster-Whisper, PyWin32);
-          - Автоматически кэширует модель Faster-Whisper `large-v3-turbo` для мгновенного старта;
-          - Компилирует нативный Windows-лаунчер `Dictatly.exe` (запуск без мелькания консоли);
-          - Создает ярлыки на Рабочем столе и в меню Пуск.
-
           ---
 
-          ## 🛠️ Установка для разработчиков / Developer Setup
+          ### Developer Setup
 
           ```powershell
           git clone https://github.com/21dkkk/Dictatly.git
@@ -51,14 +72,6 @@ jobs:
           pip install -r requirements.txt
           python main.py
           ```
-
-          ---
-
-          ## 📋 Что нового в версии 1.1.1 / What's New:
-          - **Установка в одну строку:** Полностью автоматизированный PowerShell-скрипт развертывания (`install.ps1`).
-          - **Нативный лаунчер `Dictatly.exe`:** Бесшумный запуск в фоновом режиме без появления черного окна терминала.
-          - **Оптимизация запуска:** Автоматическое подключение библиотек ускорения CUDA и CTranslate2 при старте.
-          - **Совместимость с Windows 11 24H2:** Надежное управление фоновыми процессами через CIM-командлеты.
           EOF
 
       - name: Create or Update GitHub Release

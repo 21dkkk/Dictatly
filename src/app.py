@@ -50,9 +50,11 @@ class DictatlyApp(QObject):
         # Core Engines
         self.audio = AudioRecorder(
             device_index=self.config["microphone_device"],
-            silence_timeout_seconds=float(self.config.get("silence_timeout_seconds", 0))
+            silence_timeout_seconds=float(self.config.get("silence_timeout_seconds", 0)),
+            device_name=self.config.get("microphone_device_name")
         )
         self.audio.on_volume_level = self._on_volume_level
+        self.audio.on_error = self._on_audio_error
 
         self.transcriber = SpeechTranscriber(
             model_size=self.config["whisper_model"],
@@ -143,6 +145,14 @@ class DictatlyApp(QObject):
         if hist_key:
             self.hotkey_mgr.register_hotkey(hist_key, self.open_history_signal.emit)
 
+    def _on_audio_error(self, err_msg: str):
+        """Surfaces audio hardware failure notifications to the system tray."""
+        lang = self.config.get("interface_language", "ru")
+        title = "Dictatly — Ошибка аудио" if lang == "ru" else "Dictatly — Audio Error"
+        msg = f"Микрофон недоступен: {err_msg}" if lang == "ru" else f"Microphone error: {err_msg}"
+        self.tray.show_notification(title, msg)
+        self.hud_state_signal.emit(HUDState.IDLE)
+
     def _on_volume_level(self, vol: float):
         """RMS Volume update to capsule equalizer bars."""
         if self.audio.is_recording:
@@ -180,6 +190,9 @@ class DictatlyApp(QObject):
         started = self.audio.start()
         if not started:
             self.hud_state_signal.emit(HUDState.IDLE)
+            lang = self.config.get("interface_language", "ru")
+            msg = "Не удалось открыть аудиоустройство записи." if lang == "ru" else "Could not open audio capture device."
+            self.tray.show_notification("Dictatly", msg)
         else:
             self.hotkey_mgr.on_escape_pressed = self._cancel_dictation
             play_audio_cue("start", enabled=self.config.get("sound_effects_enabled", True))
@@ -342,7 +355,10 @@ class DictatlyApp(QObject):
             size_mode=self.config["capsule_size"],
             theme="dark"
         )
-        self.audio.set_device(self.config["microphone_device"])
+        self.audio.set_device(
+            self.config.get("microphone_device"),
+            self.config.get("microphone_device_name")
+        )
         self.audio.silence_timeout_seconds = float(self.config.get("silence_timeout_seconds", 0))
         self.tray.update_language()
         self._register_all_hotkeys()
@@ -416,7 +432,10 @@ class DictatlyApp(QObject):
                 self.hud_state_signal.emit(HUDState.IDLE)
 
                 # 2. Reset and re-apply audio device
-                self.audio.set_device(self.config["microphone_device"])
+                self.audio.set_device(
+                    self.config.get("microphone_device"),
+                    self.config.get("microphone_device_name")
+                )
                 self.audio.silence_timeout_seconds = float(self.config.get("silence_timeout_seconds", 0))
 
                 # 3. Stop and re-register global hotkey hook
