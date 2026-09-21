@@ -21,34 +21,36 @@ jobs:
       - name: Prepare Release Notes
         run: |
           cat << 'EOF' > release_notes.md
-          # Dictatly 1.1.2
+          # Dictatly 1.1.3
 
-          Dictatly 1.1.2 is a core resilience and stability release focused on low-latency audio capture, Win32 input hook reliability, hardened text injection, and ASR hallucination elimination.
+          Dictatly 1.1.3 is a critical stability and performance release addressing the infinite transcribing HUD freeze, dynamic cuBLAS runtime loading for NVIDIA RTX GPUs, model context isolation, safe CPU fallback, and offline snapshot startup.
 
           ### Core Enhancements & Fixes
 
-          - **Resilient Audio Input Pipeline:**
-            - Cascading multi-tier device fallback (`device_index` -> persistent `device_name` -> system default -> any active input).
-            - Dynamic sample rate negotiation probing 16 kHz, 44.1 kHz, and 48 kHz with high-precision linear interpolation resampling (`resample_audio`).
-            - Stereo-to-mono downmixing in audio callback.
-            - Automatic error notification in system tray on hardware disconnection or driver failure.
+          - **Eliminated Infinite Transcribing HUD Freeze:**
+            - Resolved an unrecoverable CTranslate2 deadlock caused by repeated dictation attempts after a dynamic CUDA loading failure.
+            - Integrated a 20-second fail-safe watchdog timer in `_finish_dictation`, guaranteeing the floating HUD widget always returns to `HUDState.IDLE` even during unexpected driver stalls or background delays.
 
-          - **Low-Level Keyboard Hook Watchdog:**
-            - Integrated 3-second watchdog thread detecting silently detached `WH_KEYBOARD_LL` hooks caused by Windows `LowLevelHooksTimeout` (200ms) under system load.
-            - Physical key polling via `GetAsyncKeyState` on every event, purging stuck modifiers (`VK_RCONTROL`, `VK_LSHIFT`, `VK_RETURN`) caused by missed `WM_KEYUP` during Alt-Tab, UAC, or lock screens.
+          - **Dynamic NVIDIA cuBLAS Discovery & Multi-Venv Path Resolution:**
+            - Added `nvidia-cublas-cu12` dependency and broadened `setup_cuda_paths()` and `setup_cuda_dll_path()` to scan all virtual environments (`sys.prefix`, `sys.base_prefix`, workspace `venv`, and `%LOCALAPPDATA%\Dictatly\venv`).
+            - Added preflight verification for both `cublas64_12.dll` and `cublasLt64_12.dll` via `ctypes.CDLL()` before committing to CUDA mode.
 
-          - **Text Injector Hardening:**
-            - Added `KEYEVENTF_EXTENDEDKEY` (0x0001) flag for extended keys (`VK_RCONTROL`, `VK_RMENU`, `VK_RWIN`), ensuring clean modifier release before simulated `Ctrl+V`.
-            - Active caret fallback now queries target window bounding rect (`GetWindowRect`), preventing HUD coordinate displacement on multi-monitor setups.
+          - **Corrupted Model Context Isolation & Clean CPU Fallback:**
+            - Discards broken CTranslate2 model instances (`self._model = None`) immediately when a CUDA exception occurs, preventing deadlocks on subsequent dictations.
+            - Transparently falls back to CPU `int8` quantization with automatic model recreation.
 
-          - **ASR Silence & Hallucination Elimination:**
-            - RMS acoustic energy threshold gate (`rms < 0.002`) skips inference and prevents model loading on background noise or accidental key taps.
-            - Post-transcription sanitization filtering pure punctuation artifacts and hallucinated subtitle credits.
+          - **Direct Offline Model Snapshot Loading:**
+            - Implemented `resolve_local_model_path()` to locate direct local snapshot directories containing `model.bin`.
+            - Completely bypasses Hugging Face network queries during startup and dictation, achieving **1.5s cold start** and offline resilience.
 
-          - **Process Lifecycle & Logging:**
-            - Single-instance mutex switched to session-local scope (`Local\Dictatly_SingleInstance_Mutex`).
-            - Activation handoff opens the Settings window when launching a second instance.
-            - Background rotating diagnostic logging to `%APPDATA%/Dictatly/dictatly.log`.
+          - **Named Pipe IPC & Launcher Detachment:**
+            - Added explicit `"shutdown"` command to named pipe listener on exit, ensuring immediate socket unblocking during restart.
+            - Fixed Win32 mutex release null-check and verified clean launcher handoff with `UseShellExecute = true`.
+            - Added timer cleanup in `QuickHistoryWindow.closeEvent` and `hideEvent` to ensure 0.0% idle CPU usage.
+
+          - **Dual-Environment Synchronization:**
+            - Fully synchronized workspace binaries, source modules, and dependencies with `%LOCALAPPDATA%\Dictatly`.
+            - Updated Desktop, Start Menu, and Startup shortcuts to ensure all launch points run the latest 1.1.3 build.
 
           ---
 
