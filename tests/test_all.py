@@ -298,5 +298,29 @@ class TestDictatly(unittest.TestCase):
         # None / empty array
         self.assertEqual(engine.transcribe_audio(np.array([], dtype=np.float32)), "")
 
+    def test_transcriber_cache_detection(self):
+        from src.engine.transcriber import get_model_cache_dir
+        cache_dir = get_model_cache_dir("large-v3-turbo")
+        self.assertTrue(len(cache_dir) > 0)
+        self.assertTrue(Path(cache_dir).exists())
+
+    def test_named_pipe_ipc(self):
+        from multiprocessing.connection import Listener, Client
+        import threading
+        import time
+        pipe_name = r'\\.\pipe\Dictatly_IPC_Test'
+        received = []
+        def worker():
+            with Listener(pipe_name, 'AF_PIPE') as l:
+                with l.accept() as conn:
+                    received.append(conn.recv())
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        time.sleep(0.1)
+        with Client(pipe_name, 'AF_PIPE') as c:
+            c.send("settings_test")
+        t.join(timeout=1.0)
+        self.assertEqual(received, ["settings_test"])
+
 if __name__ == "__main__":
     unittest.main()

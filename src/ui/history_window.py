@@ -1760,15 +1760,18 @@ class QuickHistoryWindow(QWidget):
             return
         super().keyPressEvent(event)
 
-    def hideEvent(self, event):
+    def _stop_timers(self):
         # Guarantee 0.0% CPU when window is closed/hidden
         if hasattr(self, "chart") and hasattr(self.chart, "_anim_timer"):
             self.chart._anim_timer.stop()
         if hasattr(self, "segmented_ctrl") and hasattr(self.segmented_ctrl, "_anim_timer"):
             self.segmented_ctrl._anim_timer.stop()
+
+    def hideEvent(self, event):
+        self._stop_timers()
         super().hideEvent(event)
 
     def closeEvent(self, event):
-        self.hideEvent(event)
+        self._stop_timers()
         super().closeEvent(event)
 

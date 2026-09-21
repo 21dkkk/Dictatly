@@ -104,6 +104,10 @@ class DictatlyApp(QObject):
         msg = t("app_ready_notification", lang, hotkey=main_key_display)
         QTimer.singleShot(800, lambda: self.tray.show_notification("Dictatly", msg))
 
+        # Single-instance IPC server
+        self._ipc_server = None
+        self._start_ipc_server()
+
         # First-run onboarding check
         self.onboarding_dialog: Optional[OnboardingDialog] = None
         if not self.config.get("first_run_completed", False):
@@ -237,6 +241,11 @@ class DictatlyApp(QObject):
         # Show transcribing spinner
         self.hud_state_signal.emit(HUDState.TRANSCRIBING)
 
+        # Fail-safe watchdog: guarantee HUD resets to IDLE even if worker hangs or crashes
+        watchdog = threading.Timer(20.0, lambda: self.hud_state_signal.emit(HUDState.IDLE))
+        watchdog.daemon = True
+        watchdog.start()
+
         # Determine Enter behavior
         default_enter = self.config["enter_after_insert"]
         press_enter = not default_enter if inverted_enter else default_enter
@@ -260,7 +269,6 @@ class DictatlyApp(QObject):
                 text = self.transcriber.transcribe_audio(audio_data, language=lang)
                 if not text:
                     print("[App] Transcription produced no text.")
-                    self.hud_state_signal.emit(HUDState.IDLE)
                     return
 
                 print(f"[App] Recognized: {repr(text)}")
@@ -296,6 +304,7 @@ class DictatlyApp(QObject):
             except Exception as e:
                 print(f"[App] Error in dictation worker: {e}")
             finally:
+                watchdog.cancel()
                 self.hud_state_signal.emit(HUDState.IDLE)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -314,6 +323,11 @@ class DictatlyApp(QObject):
             self.history_window.show()
             self.history_window.raise_()
             self.history_window.activateWindow()
+            try:
+                from .core.injector import force_foreground_window
+                force_foreground_window(int(self.history_window.winId()))
+            except Exception:
+                pass
 
     @Slot()
     def show_settings(self):
@@ -327,6 +341,11 @@ class DictatlyApp(QObject):
         self.settings_window.show()
         self.settings_window.raise_()
         self.settings_window.activateWindow()
+        try:
+            from .core.injector import force_foreground_window
+            force_foreground_window(int(self.settings_window.winId()))
+        except Exception:
+            pass
 
     def _preview_hud(self, size_mode: str):
         """Displays temporary HUD above settings window to preview size."""
@@ -376,6 +395,52 @@ class DictatlyApp(QObject):
         # Allow UI button to render 'Restarting...' state briefly, then launch replacement
         QTimer.singleShot(150, lambda: self.restart_app(reopen_settings=True))
 
+    def _start_ipc_server(self):
+        """Starts Windows Named Pipe server for single-instance CLI IPC."""
+        from multiprocessing.connection import Listener
+        def ipc_worker():
+            pipe_name = r'\\.\pipe\Dictatly_IPC'
+            print(f"[IPC] Initializing named pipe listener: {pipe_name}")
+            while not getattr(self, "_is_shutting_down", False):
+                try:
+                    with Listener(pipe_name, 'AF_PIPE') as listener:
+                        self._ipc_listener = listener
+                        with listener.accept() as conn:
+                            cmd = conn.recv()
+                            print(f"[IPC] Received command: {cmd}")
+                            if cmd == "shutdown" or getattr(self, "_is_shutting_down", False):
+                                break
+                            elif cmd == "settings":
+                                self.open_settings_signal.emit()
+                            elif cmd == "history":
+                                self.open_history_signal.emit()
+                except Exception as e:
+                    if getattr(self, "_is_shutting_down", False):
+                        break
+                    print(f"[IPC] Listener error: {e}")
+                    time.sleep(0.1)
+
+        self._is_shutting_down = False
+        self._ipc_listener = None
+        t = threading.Thread(target=ipc_worker, daemon=True)
+        t.start()
+
+    def _stop_ipc_server(self):
+        """Cleanly unblocks and terminates Named Pipe server."""
+        self._is_shutting_down = True
+        try:
+            from multiprocessing.connection import Client
+            with Client(r'\\.\pipe\Dictatly_IPC', 'AF_PIPE') as conn:
+                conn.send("shutdown")
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_ipc_listener") and self._ipc_listener:
+                self._ipc_listener.close()
+                self._ipc_listener = None
+        except Exception:
+            pass
+
     def restart_app(self, reopen_settings: bool = True):
         """Cleanly terminates current process and launches a fresh Dictatly instance."""
         import subprocess
@@ -389,10 +454,16 @@ class DictatlyApp(QObject):
         except Exception:
             pass
 
-        # 2. Release single instance mutex so new instance doesn't collide
+        # 2. Close IPC pipe and release single instance mutex so new instance doesn't collide
+        self._stop_ipc_server()
+
         try:
-            from main import release_single_instance_mutex
-            release_single_instance_mutex()
+            main_mod = sys.modules.get("__main__")
+            if main_mod and hasattr(main_mod, "release_single_instance_mutex"):
+                main_mod.release_single_instance_mutex()
+            else:
+                from main import release_single_instance_mutex
+                release_single_instance_mutex()
         except Exception:
             pass
 
@@ -520,6 +591,13 @@ class DictatlyApp(QObject):
 
     def exit_app(self):
         """Clean shutdown."""
+        self._stop_ipc_server()
+        try:
+            main_mod = sys.modules.get("__main__")
+            if main_mod and hasattr(main_mod, "release_single_instance_mutex"):
+                main_mod.release_single_instance_mutex()
+        except Exception:
+            pass
         self.hotkey_mgr.stop()
         self.audio.stop()
         if hasattr(self, "db") and self.db:

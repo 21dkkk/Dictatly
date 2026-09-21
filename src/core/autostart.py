@@ -23,6 +23,12 @@ def get_pythonw_executable() -> Path:
     venv_pythonw = root / "venv" / "Scripts" / "pythonw.exe"
     if venv_pythonw.exists():
         return venv_pythonw
+    import os
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        appdata_pythonw = Path(local_app_data) / "Dictatly" / "venv" / "Scripts" / "pythonw.exe"
+        if appdata_pythonw.exists():
+            return appdata_pythonw
     prefix_pythonw = Path(sys.prefix) / "pythonw.exe"
     if prefix_pythonw.exists():
         return prefix_pythonw

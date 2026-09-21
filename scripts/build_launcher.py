@@ -20,8 +20,8 @@ using System.Reflection;
 [assembly: AssemblyDescription("Dictatly - Local Speech Dictation")]
 [assembly: AssemblyCompany("Dictatly")]
 [assembly: AssemblyCopyright("Copyright 2026 Dictatly")]
-[assembly: AssemblyFileVersion("1.1.2.0")]
-[assembly: AssemblyVersion("1.1.2.0")]
+[assembly: AssemblyFileVersion("1.1.3.0")]
+[assembly: AssemblyVersion("1.1.3.0")]
 
 namespace DictatlyLauncher
 {
@@ -53,8 +53,8 @@ namespace DictatlyLauncher
                 
                 psi.Arguments = passArgs;
                 psi.WorkingDirectory = baseDir;
-                psi.UseShellExecute = false;
-                psi.CreateNoWindow = true;
+                psi.UseShellExecute = true;
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
 
                 Process.Start(psi);
                 return 0;

@@ -143,12 +143,10 @@ Write-Notice "Upgrading pip..."
 Write-Notice "Installing PySide6, Faster-Whisper, PyWin32..."
 & $venvPip install -r (Join-Path $InstallDir "requirements.txt") --quiet
 
-# Compile native C# launcher if needed
+# Compile native C# launcher
 $launcherExe = Join-Path $InstallDir "Dictatly.exe"
-if (-not (Test-Path $launcherExe)) {
-    Write-Notice "Compiling native Windows launcher (Dictatly.exe)..."
-    & $venvPython (Join-Path $InstallDir "scripts\build_launcher.py")
-}
+Write-Notice "Compiling native Windows launcher (Dictatly.exe)..."
+& $venvPython (Join-Path $InstallDir "scripts\build_launcher.py")
 
 # 5. Pre-cache Whisper Speech Model
 Write-Step "Checking Whisper speech recognition model..." "5/6"

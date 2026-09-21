@@ -8,6 +8,8 @@ import os
 import sys
 import ctypes
 from pathlib import Path
+
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 
@@ -31,16 +33,33 @@ def setup_cuda_paths():
                         os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
             return
 
-        site_packages = Path(sys.prefix) / "Lib" / "site-packages"
-        for sub in ["nvidia/cublas/bin", "nvidia/cudnn/bin", "nvidia/cuda_nvrtc/bin", "ctranslate2"]:
-            p = site_packages / sub
-            if p.exists():
-                try:
-                    os.add_dll_directory(str(p))
-                except Exception:
-                    pass
-                if str(p) not in os.environ.get("PATH", ""):
-                    os.environ["PATH"] = str(p) + os.pathsep + os.environ.get("PATH", "")
+        candidate_roots = [
+            Path(sys.prefix) / "Lib" / "site-packages",
+            Path(sys.base_prefix) / "Lib" / "site-packages",
+            Path(r"F:\Coding\Dictatly\venv\Lib\site-packages"),
+        ]
+        local_app = os.environ.get("LOCALAPPDATA")
+        if local_app:
+            candidate_roots.append(Path(local_app) / "Programs" / "Python" / "Python312" / "Lib" / "site-packages")
+            candidate_roots.append(Path(local_app) / "Dictatly" / "venv" / "Lib" / "site-packages")
+
+        try:
+            import site
+            for sp in site.getsitepackages():
+                candidate_roots.append(Path(sp))
+        except Exception:
+            pass
+
+        for root in candidate_roots:
+            for sub in ["nvidia/cublas/bin", "nvidia/cudnn/bin", "nvidia/cuda_nvrtc/bin", "ctranslate2"]:
+                p = root / sub
+                if p.exists():
+                    try:
+                        os.add_dll_directory(str(p))
+                    except Exception:
+                        pass
+                    if str(p) not in os.environ.get("PATH", ""):
+                        os.environ["PATH"] = str(p) + os.pathsep + os.environ.get("PATH", "")
 
 setup_cuda_paths()
 
@@ -107,26 +126,43 @@ def release_single_instance_mutex():
             pass
         _GLOBAL_MUTEX = None
 
+def send_ipc_command(command: str, retries: int = 3, retry_delay: float = 0.15) -> bool:
+    """Send command to running Dictatly instance via Windows Named Pipe with brief retries."""
+    from multiprocessing.connection import Client
+    import time
+    for attempt in range(retries):
+        try:
+            with Client(r'\\.\pipe\Dictatly_IPC', 'AF_PIPE') as conn:
+                conn.send(command)
+                return True
+        except Exception:
+            if attempt < retries - 1:
+                time.sleep(retry_delay)
+    return False
+
 def acquire_single_instance_mutex() -> bool:
     """Acquire session single instance mutex, retrying during restarts if needed."""
     global _GLOBAL_MUTEX
     import time
-    mutex_name = "Local\\Dictatly_SingleInstance_Mutex"
+    mutex_name = "Dictatly_SingleInstance_Mutex_Session"
     kernel32 = ctypes.windll.kernel32
 
     # If restart flag present, give prior instance a brief grace period to release mutex
-    max_attempts = 15 if any(arg in sys.argv for arg in ("--restart", "--settings", "--history")) else 1
+    is_restart = "--restart" in sys.argv
+    max_attempts = 15 if is_restart else 1
     for attempt in range(max_attempts):
         mutex = kernel32.CreateMutexW(None, False, mutex_name)
         last_error = kernel32.GetLastError()
-        if last_error != 183:  # 183 = ERROR_ALREADY_EXISTS
+        ERROR_ALREADY_EXISTS = 183
+        if mutex and last_error != ERROR_ALREADY_EXISTS:
             _GLOBAL_MUTEX = mutex
             return True
-        kernel32.CloseHandle(mutex)
+        if mutex:
+            kernel32.CloseHandle(mutex)
         time.sleep(0.1)
 
-    # If still busy and invoked with explicit restart/command flag, terminate previous instances cleanly
-    if any(arg in sys.argv for arg in ("--settings", "--history", "--restart")):
+    # If still busy and invoked with explicit restart flag, terminate previous instances cleanly
+    if is_restart:
         import subprocess
         try:
             current_pid = os.getpid()
@@ -161,17 +197,8 @@ def main():
 
     if not acquire_single_instance_mutex():
         print("[Dictatly] Another instance is already running.")
-        # If user launched application directly without arguments, activate Settings window
-        import subprocess
-        try:
-            from src.core.autostart import get_pythonw_executable, get_project_root
-            root = get_project_root()
-            py_exe = str(get_pythonw_executable())
-            main_py = str(root / "main.py")
-            creation_flags = 0x08000000 if sys.platform == "win32" else 0
-            subprocess.Popen([py_exe, main_py, "--settings"], cwd=str(root), creationflags=creation_flags)
-        except Exception:
-            pass
+        cmd = "history" if "--history" in sys.argv else "settings"
+        send_ipc_command(cmd)
         sys.exit(0)
 
     # Enable High-DPI scaling
